@@ -89,7 +89,7 @@ ProxyPassReverse /jenease      http://127.0.0.1:8082
 
 ### `.env` file (never commit):
 ```
-JENKINS_URL=https://jenkins-csb-odf-qe-ocs4.dno.corp.redhat.com
+JENKINS_URL=https://your-jenkins-instance.example.com
 SECRET_KEY=<random 32-char string>   # python3 -c "import secrets; print(secrets.token_hex(32))"
 JENKINS_WARM_USER=<your-username>    # optional: pre-warms job catalog at startup
 JENKINS_WARM_TOKEN=<your-token>      # optional: pre-warms job catalog at startup

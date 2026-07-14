@@ -1,0 +1,344 @@
+import asyncio
+import re
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
+from auth import get_session
+from cluster_health import _parse_topology, fetch_cluster_details, fetch_cluster_health
+from jenkins import JenkinsClient
+from config import settings
+
+router = APIRouter(prefix="/api/clusters", tags=["clusters"])
+
+DEPLOY_JOB = "qe-deploy-ocs-cluster"
+DESTROY_JOB = "qe-destroy-ocs-cluster"
+
+
+def _make_client(session: dict) -> JenkinsClient:
+    return JenkinsClient(session["username"], session["token"])
+
+
+def _cluster_name_from_desc(description: str) -> Optional[str]:
+    m = re.search(r'/openshift-clusters/([^/]+)/', description or "")
+    return m.group(1) if m else None
+
+
+async def _get_build_params_safe(jenkins: JenkinsClient, job: str, build_num: int) -> dict:
+    try:
+        return await jenkins.get_build_params(job, build_num)
+    except Exception:
+        return {}
+
+
+@router.get("/active")
+async def active_clusters(session: dict = Depends(get_session)):
+    jenkins = _make_client(session)
+    username = session["username"]
+
+    # Fetch deploy + destroy builds concurrently
+    deploy_builds, destroy_builds = await asyncio.gather(
+        jenkins.get_job_builds(DEPLOY_JOB, limit=200),
+        jenkins.get_job_builds(DESTROY_JOB, limit=100),
+    )
+
+    # Build a map of cluster_name → latest destroy timestamp.
+    # Include builds that are running OR succeeded — only exclude failed/aborted destroys
+    # (a failed destroy means the cluster might still be alive).
+    # For builds without a description yet, fetch CLUSTER_NAME from params.
+    destroy_no_desc = [
+        b for b in destroy_builds
+        if (b.get("building") or b.get("result") == "SUCCESS")
+        and not _cluster_name_from_desc(b.get("description", "") or "")
+    ]
+    if destroy_no_desc:
+        destroy_param_names = await asyncio.gather(*[
+            _get_build_params_safe(jenkins, DESTROY_JOB, b["number"])
+            for b in destroy_no_desc
+        ])
+        for build, params in zip(destroy_no_desc, destroy_param_names):
+            name = params.get("CLUSTER_NAME", "")
+            if name:
+                build["_param_cluster_name"] = name
+
+    latest_destroy: dict[str, int] = {}
+    for b in destroy_builds:
+        is_active = b.get("building") or b.get("result") == "SUCCESS"
+        if not is_active:
+            continue
+        name = _cluster_name_from_desc(b.get("description", "") or "") or b.get("_param_cluster_name")
+        if name:
+            ts = b.get("timestamp", 0)
+            if ts > latest_destroy.get(name, 0):
+                latest_destroy[name] = ts
+
+    # For actively building jobs with no description yet, fetch CLUSTER_NAME from params
+    async def _get_cluster_name_from_params(build: dict) -> Optional[str]:
+        try:
+            params = await _get_build_params_safe(jenkins, DEPLOY_JOB, build["number"])
+            name = params.get("CLUSTER_NAME", "")
+            return name if name and name.lower().startswith(username.lower()) else None
+        except Exception:
+            return None
+
+    # Enrich building builds that have no description yet
+    building_no_desc = [
+        b for b in deploy_builds
+        if b.get("building") and not _cluster_name_from_desc(b.get("description", "") or "")
+    ]
+    if building_no_desc:
+        names = await asyncio.gather(*[_get_cluster_name_from_params(b) for b in building_no_desc])
+        for build, name in zip(building_no_desc, names):
+            if name:
+                build["_param_cluster_name"] = name
+
+    # Find user's deploy builds, deduplicate by cluster name (keep latest)
+    seen: dict[str, dict] = {}
+    for build in deploy_builds:
+        desc = build.get("description", "") or ""
+        cluster_name = _cluster_name_from_desc(desc) or build.get("_param_cluster_name")
+        if not cluster_name:
+            continue
+        if not cluster_name.lower().startswith(username.lower()):
+            continue
+        deploy_ts = build.get("timestamp", 0)
+        # Skip if a destroy (running or successful) started after this deploy
+        if not build.get("building") and latest_destroy.get(cluster_name, 0) > deploy_ts:
+            continue
+        # Keep the most recent deploy build per cluster
+        if cluster_name not in seen or build["number"] > seen[cluster_name]["number"]:
+            parsed = JenkinsClient.parse_build_description(desc)
+            seen[cluster_name] = {**build, **parsed, "cluster_name": cluster_name}
+
+    if not seen:
+        return []
+
+    # Fetch params for each active cluster in parallel (small N)
+    async def enrich(info: dict) -> dict:
+        # If we already fetched params for a building-no-desc build, reuse them
+        params = await _get_build_params_safe(jenkins, DEPLOY_JOB, info["number"])
+        cluster_name = info["cluster_name"]
+        platform_conf = params.get("FULL_PLATFORM_CONF") or params.get("CLUSTER_CONF") or ""
+        masters, workers = _parse_topology(platform_conf)
+        return {
+            "cluster_name": info["cluster_name"],
+            "build_num": info["number"],
+            "build_url": f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{info['number']}/",
+            "building": info.get("building", False),
+            "result": info.get("result"),
+            "timestamp": info.get("timestamp"),
+            "duration": info.get("duration"),
+            "kubeconfig_url": info.get("kubeconfig_url"),
+            "console_url": info.get("console_url"),
+            "logs_url": info.get("logs_url"),
+            "kubeadmin_password": info.get("kubeadmin_password"),
+            "agent_ip": info.get("agent_ip"),
+            "ocp_version": params.get("OCP_VERSION", ""),
+            "ocs_version": params.get("OCS_VERSION", ""),
+            "credentials_conf": params.get("CREDENTIALS_CONF", ""),
+            "platform_conf": platform_conf,
+            "osd_size": params.get("OSD_SIZE", ""),
+            "topology": {"masters": masters, "workers": workers},
+        }
+
+    results = await asyncio.gather(*[enrich(info) for info in seen.values()])
+    return sorted(results, key=lambda x: x.get("timestamp") or 0, reverse=True)
+
+
+@router.get("/{cluster_name}/health")
+async def cluster_health(cluster_name: str, session: dict = Depends(get_session)):
+    """Level 1 health: nodes + ODF status via kubeconfig. May take 10-30s."""
+    jenkins = _make_client(session)
+    username = session["username"]
+
+    if not cluster_name.lower().startswith(username.lower()):
+        return {"error": "Not your cluster"}
+
+    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+    target = None
+    for b in builds:
+        name = _cluster_name_from_desc(b.get("description", "") or "")
+        if name == cluster_name:
+            target = b
+            break
+
+    if not target:
+        return {"status": "NOT_FOUND"}
+
+    if target.get("building"):
+        return {"status": "BUILDING"}
+
+    parsed = JenkinsClient.parse_build_description(target.get("description", "") or "")
+
+    health = await fetch_cluster_health(
+        console_url=parsed.get("console_url"),
+        kubeadmin_password=parsed.get("kubeadmin_password"),
+        kubeconfig_url=parsed.get("kubeconfig_url"),
+    )
+    if not health:
+        return {"status": "UNREACHABLE"}
+
+    nodes = health.get("nodes", [])
+    odf = health.get("odf", {})
+    osd_count = health.get("osd_count", 0)
+
+    all_ready = all(n["ready"] for n in nodes)
+    odf_phase = odf.get("phase", "Unknown")
+    odf_ok = odf_phase == "Ready"
+
+    status = "HEALTHY" if (all_ready and odf_ok) else "DEGRADED" if nodes else "UNREACHABLE"
+
+    return {
+        "status": status,
+        "nodes": nodes,
+        "odf": odf,
+        "osd_count": osd_count,
+        "osd_up": health.get("osd_up"),
+        "osd_in": health.get("osd_in"),
+        "ceph_capacity": health.get("ceph_capacity"),
+        "ocp_full_version": health.get("ocp_full_version"),
+        "odf_full_version": health.get("odf_full_version"),
+    }
+
+
+@router.get("/{cluster_name}/kubeconfig")
+async def download_kubeconfig(cluster_name: str, session: dict = Depends(get_session)):
+    """Proxy the kubeconfig from magna002 to the browser as a file download."""
+    import httpx
+    from fastapi.responses import Response
+
+    jenkins = _make_client(session)
+    username = session["username"]
+
+    if not cluster_name.lower().startswith(username.lower()):
+        from fastapi import HTTPException
+        raise HTTPException(403, "Not your cluster")
+
+    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+    for b in builds:
+        if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+            parsed = JenkinsClient.parse_build_description(b.get("description", "") or "")
+            kubeconfig_url = parsed.get("kubeconfig_url")
+            if kubeconfig_url:
+                async with httpx.AsyncClient(timeout=10.0) as c:
+                    r = await c.get(kubeconfig_url)
+                    if r.is_success:
+                        return Response(
+                            content=r.content,
+                            media_type="application/x-yaml",
+                            headers={"Content-Disposition": f'attachment; filename="kubeconfig-{cluster_name}"'},
+                        )
+    from fastapi import HTTPException
+    raise HTTPException(404, "Kubeconfig not found")
+
+
+@router.get("/{cluster_name}/details")
+async def cluster_details(cluster_name: str, session: dict = Depends(get_session)):
+    """Level 2: pods, PVCs, node detail for the cluster detail view."""
+    jenkins = _make_client(session)
+    username = session["username"]
+
+    if not cluster_name.lower().startswith(username.lower()):
+        return {"error": "Not your cluster"}
+
+    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+    target = None
+    for b in builds:
+        if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+            target = b
+            break
+
+    if not target or target.get("building"):
+        return {"error": "Not available while building"}
+
+    parsed = JenkinsClient.parse_build_description(target.get("description", "") or "")
+
+    details = await fetch_cluster_details(
+        console_url=parsed.get("console_url"),
+        kubeadmin_password=parsed.get("kubeadmin_password"),
+        kubeconfig_url=parsed.get("kubeconfig_url"),
+    )
+    return details or {}
+
+
+@router.post("/{cluster_name}/abort")
+async def abort_cluster_build(cluster_name: str, session: dict = Depends(get_session)):
+    """Abort the currently running deploy build for this cluster."""
+    jenkins = _make_client(session)
+    username = session["username"]
+
+    if not cluster_name.lower().startswith(username.lower()):
+        from fastapi import HTTPException
+        raise HTTPException(403, "Not your cluster")
+
+    # Find the building build for this cluster — check description AND params
+    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+    building = [b for b in builds if b.get("building")]
+
+    for b in building:
+        desc_name = _cluster_name_from_desc(b.get("description", "") or "")
+        if desc_name == cluster_name:
+            await jenkins.abort_build(DEPLOY_JOB, b["number"])
+            return {"ok": True, "build_num": b["number"]}
+
+    # Description not written yet — fall back to checking CLUSTER_NAME param
+    for b in building:
+        if _cluster_name_from_desc(b.get("description", "") or ""):
+            continue  # already matched or mismatched above
+        params = await _get_build_params_safe(jenkins, DEPLOY_JOB, b["number"])
+        if params.get("CLUSTER_NAME") == cluster_name:
+            await jenkins.abort_build(DEPLOY_JOB, b["number"])
+            return {"ok": True, "build_num": b["number"]}
+
+    raise HTTPException(404, "No building deploy found for this cluster")
+
+
+class DestroyRequest(BaseModel):
+    force_jslave_destroy: bool = False
+    longevity_cluster: bool = False
+    do_not_release_lock: bool = False
+
+
+@router.post("/{cluster_name}/destroy")
+async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict = Depends(get_session)):
+    """Trigger qe-destroy-ocs-cluster, carrying over params from the original deploy build."""
+    jenkins = _make_client(session)
+    username = session["username"]
+
+    if not cluster_name.lower().startswith(username.lower()):
+        raise HTTPException(403, "Not your cluster")
+
+    # Find the deploy build to carry over platform params
+    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+    deploy_params: dict = {}
+    for b in builds:
+        if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+            deploy_params = await _get_build_params_safe(jenkins, DEPLOY_JOB, b["number"])
+            break
+
+    params: dict = {
+        "CLUSTER_NAME": cluster_name,
+        "OCS_VERSION": deploy_params.get("OCS_VERSION", ""),
+        "OCP_VERSION": deploy_params.get("OCP_VERSION", ""),
+        "CREDENTIALS_CONF": deploy_params.get("CREDENTIALS_CONF", ""),
+        "FULL_PLATFORM_CONF": deploy_params.get("FULL_PLATFORM_CONF", ""),
+        "PLATFORM_CONF": deploy_params.get("PLATFORM_CONF", ""),
+        "CLUSTER_CONF": deploy_params.get("CLUSTER_CONF", ""),
+        "FORCE_JSLAVE_DESTROY": str(body.force_jslave_destroy).lower(),
+        "LONGEVITY_CLUSTER": str(body.longevity_cluster).lower(),
+        "DO_NOT_RELEASE_LOCK": str(body.do_not_release_lock).lower(),
+        "PRODUCTION_RUN": "false",
+    }
+    params = {k: v for k, v in params.items() if v not in (None, "")}
+
+    print(f"[DESTROY] user={username} → {DESTROY_JOB} cluster={cluster_name}", flush=True)
+
+    try:
+        queue_item = await jenkins.trigger_job(DESTROY_JOB, params)
+    except Exception as e:
+        print(f"[DESTROY ERROR] {e}", flush=True)
+        raise HTTPException(502, f"Jenkins destroy failed: {e}")
+
+    print(f"[DESTROY OK] queue_item={queue_item} cluster={cluster_name}", flush=True)
+    return {"queue_item": queue_item, "job": DESTROY_JOB, "cluster_name": cluster_name}

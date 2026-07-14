@@ -1,0 +1,75 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Search input blink animation after build trigger */
+@keyframes search-highlight {
+  0%, 100% { border-color: #30363d; box-shadow: none; }
+  50%       { border-color: #00d4ff; box-shadow: 0 0 0 3px rgba(0,212,255,0.2); }
+}
+.search-blink {
+  animation: search-highlight 0.45s ease-in-out 6;
+}
+
+/* Force dark background — prevents white flash on load */
+html {
+  background-color: #070b0f;
+}
+
+@layer base {
+  body {
+    @apply text-text-primary font-sans;
+    background-color: #0d1117;
+  }
+
+  /* Webkit scrollbars — dark themed */
+  ::-webkit-scrollbar {
+    @apply w-1.5 h-1.5;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-surface-1;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-surface-4 rounded-full;
+  }
+
+  /* Firefox / GTK scrollbars — force dark track */
+  * {
+    scrollbar-color: #30363d #0d1117;
+    scrollbar-width: thin;
+  }
+
+  /* Hide the OS scrollbar on the main scroll container.
+     The page is still scrollable via mouse wheel / trackpad.
+     This prevents the GTK white scrollbar gutter from appearing. */
+  main {
+    scrollbar-width: none;        /* Firefox */
+    -ms-overflow-style: none;     /* IE/Edge */
+  }
+  main::-webkit-scrollbar {
+    display: none;                /* Chrome/Chromium */
+  }
+}
+
+@layer components {
+  .input {
+    @apply bg-surface-3 border border-surface-4 rounded px-3 py-2 text-text-primary text-sm
+           focus:outline-none focus:border-accent-cyan focus:ring-1 focus:ring-accent-cyan/30
+           placeholder:text-text-muted transition-colors w-full;
+  }
+
+  .btn-primary {
+    @apply bg-accent-cyan text-surface-0 font-semibold px-4 py-2 rounded
+           hover:brightness-110 active:brightness-90 transition-all text-sm
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  .btn-ghost {
+    @apply border border-surface-4 text-text-secondary px-4 py-2 rounded
+           hover:border-accent-cyan hover:text-accent-cyan transition-colors text-sm;
+  }
+
+  .card {
+    @apply bg-surface-2 border border-surface-4 rounded-lg;
+  }
+}

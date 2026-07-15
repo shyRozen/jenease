@@ -1,8 +1,9 @@
 import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import ClusterCard from '../components/ClusterCard'
+import DestroyDrawer from '../components/DestroyDrawer'
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
@@ -109,7 +110,9 @@ function Chips({ label, options, selected, onChange }: {
 // ── cluster row (list view) ───────────────────────────────────────────────────
 
 function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen]           = useState(false)
+  const [destroyOpen, setDestroyOpen] = useState(false)
+  const queryClient = useQueryClient()
   const platform = detectPlatform(c.credentials_conf, c.platform_conf)
   const isMe = c.owner === me
 
@@ -176,6 +179,14 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
             className="text-[10px] font-mono text-text-muted hover:text-accent-cyan transition-colors">
             #{c.build_num}↗
           </a>
+          {isMe && !c.building && (
+            <button
+              onClick={e => { e.preventDefault(); setDestroyOpen(true) }}
+              className="text-[10px] font-mono text-accent-red/30 hover:text-accent-red transition-colors"
+            >
+              ✕
+            </button>
+          )}
         </div>
       </div>
       {open && (
@@ -191,6 +202,20 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
             Open detail →
           </Link>
         </div>
+      )}
+      {destroyOpen && (
+        <DestroyDrawer
+          clusterName={c.cluster_name}
+          ocpVersion={c.ocp_version}
+          ocsVersion={c.ocs_version}
+          credentialsConf={c.credentials_conf}
+          onClose={() => setDestroyOpen(false)}
+          onDestroyed={() => {
+            setDestroyOpen(false)
+            queryClient.invalidateQueries({ queryKey: ['all-clusters'] })
+            queryClient.invalidateQueries({ queryKey: ['clusters'] })
+          }}
+        />
       )}
     </div>
   )

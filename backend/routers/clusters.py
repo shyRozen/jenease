@@ -146,14 +146,113 @@ async def active_clusters(session: dict = Depends(get_session)):
     return sorted(results, key=lambda x: x.get("timestamp") or 0, reverse=True)
 
 
+@router.get("/all")
+async def all_clusters(session: dict = Depends(get_session)):
+    """All active clusters across all users (no username filter)."""
+    jenkins = _make_client(session)
+
+    deploy_builds, destroy_builds = await asyncio.gather(
+        jenkins.get_job_builds(DEPLOY_JOB, limit=200),
+        jenkins.get_job_builds(DESTROY_JOB, limit=100),
+    )
+
+    # Destroy map (same logic as active_clusters)
+    destroy_no_desc = [
+        b for b in destroy_builds
+        if (b.get("building") or b.get("result") == "SUCCESS")
+        and not _cluster_name_from_desc(b.get("description", "") or "")
+    ]
+    if destroy_no_desc:
+        d_params = await asyncio.gather(*[
+            _get_build_params_safe(jenkins, DESTROY_JOB, b["number"])
+            for b in destroy_no_desc
+        ])
+        for build, params in zip(destroy_no_desc, d_params):
+            name = params.get("CLUSTER_NAME", "")
+            if name:
+                build["_param_cluster_name"] = name
+
+    latest_destroy: dict[str, int] = {}
+    for b in destroy_builds:
+        if not (b.get("building") or b.get("result") == "SUCCESS"):
+            continue
+        name = _cluster_name_from_desc(b.get("description", "") or "") or b.get("_param_cluster_name")
+        if name:
+            ts = b.get("timestamp", 0)
+            if ts > latest_destroy.get(name, 0):
+                latest_destroy[name] = ts
+
+    # Enrich building builds with no description (all users)
+    building_no_desc = [
+        b for b in deploy_builds
+        if b.get("building") and not _cluster_name_from_desc(b.get("description", "") or "")
+    ]
+    if building_no_desc:
+        names_params = await asyncio.gather(*[
+            _get_build_params_safe(jenkins, DEPLOY_JOB, b["number"])
+            for b in building_no_desc
+        ])
+        for build, params in zip(building_no_desc, names_params):
+            name = params.get("CLUSTER_NAME", "")
+            if name:
+                build["_param_cluster_name"] = name
+
+    # Collect all clusters (no username filter)
+    seen: dict[str, dict] = {}
+    for build in deploy_builds:
+        desc = build.get("description", "") or ""
+        cluster_name = _cluster_name_from_desc(desc) or build.get("_param_cluster_name")
+        if not cluster_name:
+            continue
+        deploy_ts = build.get("timestamp", 0)
+        if not build.get("building") and latest_destroy.get(cluster_name, 0) > deploy_ts:
+            continue
+        if cluster_name not in seen or build["number"] > seen[cluster_name]["number"]:
+            parsed = JenkinsClient.parse_build_description(desc)
+            seen[cluster_name] = {**build, **parsed, "cluster_name": cluster_name}
+
+    if not seen:
+        return []
+
+    import re as _re
+
+    async def enrich_all(info: dict) -> dict:
+        params = await _get_build_params_safe(jenkins, DEPLOY_JOB, info["number"])
+        cluster_name = info["cluster_name"]
+        platform_conf = params.get("FULL_PLATFORM_CONF") or params.get("CLUSTER_CONF") or ""
+        masters, workers = _parse_topology(platform_conf)
+        # Derive owner from cluster name alphabetic prefix
+        m = _re.match(r'^([a-zA-Z]+)', cluster_name)
+        owner = m.group(1) if m else cluster_name
+        return {
+            "cluster_name": cluster_name,
+            "owner": owner,
+            "build_num": info["number"],
+            "build_url": f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{info['number']}/",
+            "building": info.get("building", False),
+            "result": info.get("result"),
+            "timestamp": info.get("timestamp"),
+            "kubeconfig_url": info.get("kubeconfig_url"),
+            "console_url": info.get("console_url"),
+            "logs_url": info.get("logs_url"),
+            "kubeadmin_password": info.get("kubeadmin_password"),
+            "ocp_version": params.get("OCP_VERSION", ""),
+            "ocs_version": params.get("OCS_VERSION", ""),
+            "credentials_conf": params.get("CREDENTIALS_CONF", ""),
+            "platform_conf": platform_conf,
+            "osd_size": params.get("OSD_SIZE", ""),
+            "topology": {"masters": masters, "workers": workers},
+        }
+
+    results = await asyncio.gather(*[enrich_all(info) for info in seen.values()])
+    return sorted(results, key=lambda x: x.get("timestamp") or 0, reverse=True)
+
+
 @router.get("/{cluster_name}/health")
 async def cluster_health(cluster_name: str, session: dict = Depends(get_session)):
     """Level 1 health: nodes + ODF status via kubeconfig. May take 10-30s."""
     jenkins = _make_client(session)
     username = session["username"]
-
-    if not cluster_name.lower().startswith(username.lower()):
-        return {"error": "Not your cluster"}
 
     builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
     target = None
@@ -239,9 +338,6 @@ async def cluster_details(cluster_name: str, session: dict = Depends(get_session
     """Level 2: pods, PVCs, node detail for the cluster detail view."""
     jenkins = _make_client(session)
     username = session["username"]
-
-    if not cluster_name.lower().startswith(username.lower()):
-        return {"error": "Not your cluster"}
 
     builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
     target = None

@@ -4,11 +4,12 @@ import { api } from '../api/client'
 import type { User } from '../types'
 
 const NAV = [
-  { to: '/clusters', label: 'My Clusters', icon: '⬡' },
-  { to: '/deploy',   label: 'Deploy',      icon: '▶' },
-  { to: '/destroy',  label: 'Destroy',     icon: '✕' },
-  { to: '/presets',  label: 'Presets',     icon: '◈' },
-  { to: '/agents',   label: 'Agents',      icon: '◉' },
+  { to: '/clusters',     label: 'My Clusters',  icon: '⬡' },
+  { to: '/all-clusters', label: 'All Clusters',  icon: '⊞' },
+  { to: '/deploy',       label: 'Deploy',        icon: '▶' },
+  { to: '/destroy',      label: 'Destroy',       icon: '✕' },
+  { to: '/presets',      label: 'Presets',       icon: '◈' },
+  { to: '/agents',       label: 'Agents',        icon: '◉' },
 ]
 
 export default function Layout() {

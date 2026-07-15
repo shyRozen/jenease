@@ -3,6 +3,7 @@ import { Navigate, Route, BrowserRouter as Router, Routes } from 'react-router-d
 import { api } from './api/client'
 import Layout from './components/Layout'
 import Agents from './pages/Agents'
+import AllClusters from './pages/AllClusters'
 import ClusterDetail from './pages/ClusterDetail'
 import Deploy from './pages/Deploy'
 import Login from './pages/Login'
@@ -44,6 +45,7 @@ function App() {
           <Route index element={<Navigate to="/clusters" replace />} />
           <Route path="clusters" element={<MyClusters />} />
           <Route path="clusters/:name" element={<ClusterDetail />} />
+          <Route path="all-clusters" element={<AllClusters username={user.username} />} />
           <Route path="deploy"   element={<Deploy />} />
           <Route path="destroy"  element={<Placeholder title="Destroy" />} />
           <Route path="presets"  element={<Placeholder title="Presets" />} />

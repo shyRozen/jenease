@@ -45,7 +45,7 @@ export default function Login({ onLogin }: Props) {
         <div className="text-center mb-8">
           <div className="inline-flex items-center gap-2 mb-3">
             <span className="text-accent-cyan font-mono text-3xl font-semibold tracking-tight">
-              jen<span className="text-accent-green">ease</span>
+              Jen<span className="text-accent-green">Ease</span>
             </span>
           </div>
           <p className="text-text-secondary text-sm font-mono">

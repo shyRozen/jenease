@@ -28,8 +28,8 @@ export default function Layout() {
         {/* Logo */}
         <div className="px-5 py-5 border-b border-surface-4">
           <span className="font-mono text-xl font-semibold tracking-tight">
-            <span className="text-accent-cyan">jen</span>
-            <span className="text-accent-green">ease</span>
+            <span className="text-accent-cyan">Jen</span>
+            <span className="text-accent-green">Ease</span>
           </span>
         </div>
 

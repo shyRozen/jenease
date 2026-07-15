@@ -350,9 +350,9 @@ async def fetch_cluster_health(
                         kube_api_url = c_data.get('server')
                         break
 
-                    # Try to get OAuth token through the proxy (enables Prometheus IOPS)
+                    # Try to get OAuth token — through proxy if present, directly otherwise
                     kube_token = None
-                    if kube_proxy and kube_api_url and kubeadmin_password:
+                    if kube_api_url and kubeadmin_password:
                         kube_token = await _get_oauth_token(
                             kube_api_url, kubeadmin_password, proxy_url=kube_proxy
                         )

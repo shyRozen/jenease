@@ -50,10 +50,12 @@ function WorkloadCard({
   workload,
   clusterName,
   onDelete,
+  onRateUpdate,
 }: {
   workload: WorkloadEntry
   clusterName: string
   onDelete: () => void
+  onRateUpdate?: (id: number, rateMb: number | null) => void
 }) {
   const [logs, setLogs]           = useState<string[]>([])
   const [progress, setProgress]   = useState<number | null>(null)
@@ -75,8 +77,18 @@ function WorkloadCard({
       const data = JSON.parse(e.data)
       if (data.line) setLogs(prev => [...prev, data.line].slice(-150))
       if (data.progress != null) setProgress(data.progress)
-      if (data.rate)             setRate(data.rate)
       if (data.eta)              setEta(data.eta)
+      if (data.rate) {
+        setRate(data.rate)
+        // Parse to MB/s number for aggregation: "234MiB/s", "7MB/s", "45MB/s"
+        const m = data.rate.match(/^([\d.]+)\s*(MiB|MB|KiB|KB|GiB|GB)\/s/)
+        if (m) {
+          const val = parseFloat(m[1])
+          const unit = m[2]
+          const mb = unit.startsWith('K') ? val / 1024 : unit.startsWith('G') ? val * 1024 : val
+          onRateUpdate?.(workload.id, mb)
+        }
+      }
     }
     es.onerror = () => es.close()
     return () => { es.close(); esRef.current = null }
@@ -89,6 +101,7 @@ function WorkloadCard({
   async function handleDelete() {
     if (!confirmDelete) { setConfirmDelete(true); return }
 
+    onRateUpdate?.(workload.id, null)
     // Close existing log stream and switch to cleanup SSE in the terminal
     // (cleanup SSE handles both k8s deletion and DB record removal)
     esRef.current?.close()
@@ -213,6 +226,16 @@ export default function WorkloadPanel({
   const [launchError, setLaunchError] = useState('')
 
   const [purging, setPurging] = useState(false)
+  const [rates, setRates] = useState<Record<number, number>>({})
+
+  function handleRateUpdate(id: number, rateMb: number | null) {
+    setRates(prev => {
+      const next = { ...prev }
+      if (rateMb == null) delete next[id]
+      else next[id] = rateMb
+      return next
+    })
+  }
 
   const { data: workloads = [], refetch } = useQuery<WorkloadEntry[]>({
     queryKey: ['workloads', clusterName],
@@ -329,6 +352,39 @@ export default function WorkloadPanel({
       </div>}
 
       {/* Active workloads */}
+      {showList && workloads.length > 0 && (() => {
+        const types = ['rbd', 'cephfs', 'noobaa'] as const
+        const typeLabel: Record<string, string> = { rbd: 'RBD', cephfs: 'CephFS', noobaa: 'NooBaa' }
+        const typeColor: Record<string, string> = { rbd: 'text-accent-cyan', cephfs: 'text-accent-green', noobaa: 'text-accent-amber' }
+        const byType: Record<string, number> = {}
+        let total = 0
+        for (const w of workloads) {
+          const r = rates[w.id] ?? 0
+          byType[w.workload_type] = (byType[w.workload_type] ?? 0) + r
+          total += r
+        }
+        const hasAny = total > 0
+        return hasAny ? (
+          <div className="border border-surface-4 rounded-lg px-3 py-2 bg-surface-2/40 space-y-1">
+            <p className="text-[9px] font-mono text-text-muted uppercase tracking-widest">Throughput</p>
+            <div className="flex flex-wrap gap-x-4 gap-y-0.5">
+              {types.filter(t => byType[t]).map(t => (
+                <span key={t} className="text-[10px] font-mono">
+                  <span className="text-text-muted">{typeLabel[t]} </span>
+                  <span className={typeColor[t]}>{byType[t].toFixed(0)} MB/s</span>
+                </span>
+              ))}
+              {total > 0 && (
+                <span className="text-[10px] font-mono ml-auto">
+                  <span className="text-text-muted">Total </span>
+                  <span className="text-text-primary font-semibold">{total.toFixed(0)} MB/s</span>
+                </span>
+              )}
+            </div>
+          </div>
+        ) : null
+      })()}
+
       {showList && workloads.length > 0 && (
         <div className="space-y-2">
           {workloads.map(w => (
@@ -336,7 +392,9 @@ export default function WorkloadPanel({
               key={w.id}
               workload={w}
               clusterName={clusterName}
+              onRateUpdate={handleRateUpdate}
               onDelete={() => {
+                setRates(prev => { const n = {...prev}; delete n[w.id]; return n })
                 queryClient.invalidateQueries({ queryKey: ['workloads', clusterName] })
               }}
             />

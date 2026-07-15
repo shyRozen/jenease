@@ -1,9 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 
-export interface DataPoint { ts: number; total: number }
+export interface DataPoint {
+  ts: number
+  total: number
+  rbd: number
+  cephfs: number
+  noobaa: number
+}
 
 const VISIBLE_SECS = 60
 const PAD = { top: 8, right: 8, bottom: 20, left: 44 }
+
+const SERIES = [
+  { key: 'rbd'    as const, label: 'RBD',    color: '#00d4ff', dash: ''    },
+  { key: 'cephfs' as const, label: 'CephFS', color: '#00ff9d', dash: ''    },
+  { key: 'noobaa' as const, label: 'NooBaa', color: '#ffb700', dash: ''    },
+  { key: 'total'  as const, label: 'Total',  color: '#e6edf3', dash: '4,2' },
+] as const
 
 function niceMax(v: number) {
   if (v <= 0) return 10
@@ -45,6 +58,11 @@ export default function ThroughputChart({ data }: { data: DataPoint[] }) {
   const visible = data.filter(d => d.ts >= startMs - 2000 && d.ts <= endMs + 2000)
   const maxVal  = niceMax(Math.max(...data.slice(-300).map(d => d.total), 1))
 
+  function makePath(key: keyof DataPoint) {
+    const pts = visible.map(d => `${tsToX(d.ts).toFixed(1)},${valToY(Number(d[key])).toFixed(1)}`)
+    return pts.length > 1 ? `M${pts.join('L')}` : ''
+  }
+
   function tsToX(ts: number) {
     return PAD.left + ((ts - startMs) / (VISIBLE_SECS * 1000)) * W
   }
@@ -52,11 +70,10 @@ export default function ThroughputChart({ data }: { data: DataPoint[] }) {
     return PAD.top + H - (v / maxVal) * H
   }
 
-  // Build SVG path
-  const points = visible.map(d => `${tsToX(d.ts).toFixed(1)},${valToY(d.total).toFixed(1)}`)
-  const linePath = points.length > 1 ? `M${points.join('L')}` : ''
-  const areaPath = points.length > 1
-    ? `M${tsToX(visible[0].ts).toFixed(1)},${(PAD.top + H).toFixed(1)}L${points.join('L')}L${tsToX(visible[visible.length - 1].ts).toFixed(1)},${(PAD.top + H).toFixed(1)}Z`
+  // Area fill just for total
+  const totalPts = visible.map(d => `${tsToX(d.ts).toFixed(1)},${valToY(d.total).toFixed(1)}`)
+  const areaPath = totalPts.length > 1
+    ? `M${tsToX(visible[0].ts).toFixed(1)},${(PAD.top + H).toFixed(1)}L${totalPts.join('L')}L${tsToX(visible[visible.length - 1].ts).toFixed(1)},${(PAD.top + H).toFixed(1)}Z`
     : ''
 
   // Y-axis ticks
@@ -94,7 +111,16 @@ export default function ThroughputChart({ data }: { data: DataPoint[] }) {
   return (
     <div ref={containerRef} className="select-none">
       <div className="flex items-center justify-between mb-1">
-        <p className="text-[9px] font-mono text-text-muted uppercase tracking-widest">Total Throughput</p>
+        <div className="flex items-center gap-3">
+          <p className="text-[9px] font-mono text-text-muted uppercase tracking-widest">Throughput</p>
+          {SERIES.map(s => (
+            <span key={s.key} className="flex items-center gap-1">
+              <span className="w-3 h-0.5 inline-block rounded"
+                style={{ background: s.color, opacity: s.key === 'total' ? 0.7 : 0.9 }} />
+              <span className="text-[9px] font-mono" style={{ color: s.color }}>{s.label}</span>
+            </span>
+          ))}
+        </div>
         <div className="flex items-center gap-2">
           {!isLive && (
             <button
@@ -104,7 +130,7 @@ export default function ThroughputChart({ data }: { data: DataPoint[] }) {
               ↦ live
             </button>
           )}
-          <span className="text-[9px] font-mono text-text-muted">← drag to scroll history</span>
+          <span className="text-[9px] font-mono text-text-muted">← drag</span>
         </div>
       </div>
 
@@ -141,23 +167,29 @@ export default function ThroughputChart({ data }: { data: DataPoint[] }) {
           </linearGradient>
         </defs>
 
-        {/* Area fill */}
+        {/* Total area fill */}
         {areaPath && (
           <path d={areaPath} fill="url(#area-grad)" clipPath="url(#plot-clip)" />
         )}
 
-        {/* Line */}
-        {linePath && (
-          <path d={linePath} fill="none" stroke="#00d4ff" strokeWidth={1.5}
-            strokeLinejoin="round" clipPath="url(#plot-clip)" />
-        )}
+        {/* Per-series lines (draw total last so it's on top) */}
+        {SERIES.map(s => {
+          const p = makePath(s.key)
+          return p ? (
+            <path key={s.key} d={p} fill="none" stroke={s.color}
+              strokeWidth={s.key === 'total' ? 1.5 : 1}
+              strokeDasharray={s.dash}
+              strokeOpacity={s.key === 'total' ? 0.7 : 0.9}
+              strokeLinejoin="round" clipPath="url(#plot-clip)" />
+          ) : null
+        })}
 
-        {/* Live indicator dot */}
+        {/* Live indicator dot on total */}
         {isLive && visible.length > 0 && (() => {
           const last = visible[visible.length - 1]
           return (
             <circle cx={tsToX(last.ts)} cy={valToY(last.total)} r={3}
-              fill="#00d4ff" clipPath="url(#plot-clip)" />
+              fill="#e6edf3" clipPath="url(#plot-clip)" />
           )
         })()}
 
@@ -177,13 +209,13 @@ export default function ThroughputChart({ data }: { data: DataPoint[] }) {
         <line x1={PAD.left} y1={PAD.top + H} x2={PAD.left + W} y2={PAD.top + H}
           stroke="#30363d" strokeWidth={0.5} />
 
-        {/* Current value label */}
+        {/* Current total label */}
         {visible.length > 0 && (() => {
           const last = visible[visible.length - 1]
-          const x = Math.min(tsToX(last.ts), PAD.left + W - 60)
+          const x = Math.min(tsToX(last.ts), PAD.left + W - 70)
           const y = Math.max(valToY(last.total) - 6, PAD.top + 10)
           return (
-            <text x={x + 6} y={y} fontSize={9} fill="#00d4ff" fontFamily="monospace">
+            <text x={x + 6} y={y} fontSize={9} fill="#e6edf3" fontFamily="monospace" fontWeight="bold">
               {last.total.toFixed(0)} MB/s
             </text>
           )

@@ -229,7 +229,8 @@ export default function WorkloadPanel({
   const [purging, setPurging] = useState(false)
   const [rates, setRates] = useState<Record<number, number>>({})
   const [history, setHistory] = useState<DataPoint[]>([])
-  const ratesRef = useRef<Record<number, number>>({})
+  const ratesRef    = useRef<Record<number, number>>({})
+  const workloadsRef = useRef<WorkloadEntry[]>([])
 
   function handleRateUpdate(id: number, rateMb: number | null) {
     setRates(prev => {
@@ -241,11 +242,19 @@ export default function WorkloadPanel({
     })
   }
 
-  // Sample total MB/s every second and append to history
+  // Sample per-type and total MB/s every second
   useEffect(() => {
     const id = setInterval(() => {
-      const total = Object.values(ratesRef.current).reduce((a, b) => a + b, 0)
-      setHistory(prev => [...prev.slice(-600), { ts: Date.now(), total }])
+      const byType: Record<string, number> = { rbd: 0, cephfs: 0, noobaa: 0 }
+      for (const w of workloadsRef.current) {
+        const r = ratesRef.current[w.id] ?? 0
+        byType[w.workload_type] = (byType[w.workload_type] ?? 0) + r
+      }
+      const total = Object.values(byType).reduce((a, b) => a + b, 0)
+      setHistory(prev => [...prev.slice(-600), {
+        ts: Date.now(), total,
+        rbd: byType.rbd, cephfs: byType.cephfs, noobaa: byType.noobaa,
+      }])
     }, 1000)
     return () => clearInterval(id)
   }, [])
@@ -255,6 +264,7 @@ export default function WorkloadPanel({
     queryFn: () => api.get(`/clusters/${clusterName}/workloads`),
     refetchInterval: 10_000,
   })
+  workloadsRef.current = workloads
 
   async function handlePurge() {
     setPurging(true)

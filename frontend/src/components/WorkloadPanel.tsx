@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
+import ThroughputChart, { type DataPoint } from './ThroughputChart'
 
 interface WorkloadEntry {
   id: number
@@ -227,15 +228,27 @@ export default function WorkloadPanel({
 
   const [purging, setPurging] = useState(false)
   const [rates, setRates] = useState<Record<number, number>>({})
+  const [history, setHistory] = useState<DataPoint[]>([])
+  const ratesRef = useRef<Record<number, number>>({})
 
   function handleRateUpdate(id: number, rateMb: number | null) {
     setRates(prev => {
       const next = { ...prev }
       if (rateMb == null) delete next[id]
       else next[id] = rateMb
+      ratesRef.current = next
       return next
     })
   }
+
+  // Sample total MB/s every second and append to history
+  useEffect(() => {
+    const id = setInterval(() => {
+      const total = Object.values(ratesRef.current).reduce((a, b) => a + b, 0)
+      setHistory(prev => [...prev.slice(-600), { ts: Date.now(), total }])
+    }, 1000)
+    return () => clearInterval(id)
+  }, [])
 
   const { data: workloads = [], refetch } = useQuery<WorkloadEntry[]>({
     queryKey: ['workloads', clusterName],
@@ -352,6 +365,10 @@ export default function WorkloadPanel({
       </div>}
 
       {/* Active workloads */}
+      {showList && (
+        <ThroughputChart data={history} />
+      )}
+
       {showList && workloads.length > 0 && (() => {
         const types = ['rbd', 'cephfs', 'noobaa'] as const
         const typeLabel: Record<string, string> = { rbd: 'RBD', cephfs: 'CephFS', noobaa: 'NooBaa' }

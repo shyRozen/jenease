@@ -110,7 +110,7 @@ print('[jenease] Workload complete.', flush=True)
 
 # NooBaa boto3 script injected via pod command
 _NOOBAA_SCRIPT = """
-import boto3, os, sys, time
+import boto3, os, time
 import urllib3; urllib3.disable_warnings()
 
 endpoint = os.environ["S3_ENDPOINT"]
@@ -128,20 +128,33 @@ try:
 except Exception:
     pass
 
-chunk     = b"x" * (1024 * 1024)   # 1 MB
-total_mb  = size_gb * 1024
+chunk    = b"x" * (1024 * 1024)   # 1 MB
+total_mb = size_gb * 1024
+
+def run_io(op, total):
+    label  = "WRITE" if op == "write" else "READ"
+    rwtag  = "w"     if op == "write" else "r"
+    start  = time.time()
+    last   = start
+    for i in range(total):
+        if op == "write":
+            s3.put_object(Bucket=bucket, Key=f"obj-{i:06d}", Body=chunk)
+        else:
+            s3.get_object(Bucket=bucket, Key=f"obj-{i:06d}")["Body"].read()
+        now = time.time()
+        if now - last >= 1.0 or i == total - 1:
+            pct    = (i + 1) / total * 100
+            rate   = (i + 1) / max(0.001, now - start)   # MB/s
+            eta_s  = int((total - i - 1) / max(0.001, rate))
+            eta    = f"{eta_s // 60}m{eta_s % 60:02d}s" if eta_s > 60 else f"{eta_s}s"
+            print(f"[{label}][{pct:.1f}%][{rwtag}={rate:.0f}MB/s][eta {eta}]", flush=True)
+            last = now
 
 if mode in ("write", "readwrite"):
-    for i in range(total_mb):
-        s3.put_object(Bucket=bucket, Key=f"obj-{i:06d}", Body=chunk)
-        pct = (i + 1) / total_mb * 100
-        print(f"[WRITE][{pct:.1f}%][{i+1}/{total_mb} MB written]", flush=True)
+    run_io("write", total_mb)
 
 if mode in ("read", "readwrite"):
-    for i in range(total_mb):
-        s3.get_object(Bucket=bucket, Key=f"obj-{i:06d}")["Body"].read()
-        pct = (i + 1) / total_mb * 100
-        print(f"[READ][{pct:.1f}%][{i+1}/{total_mb} MB read]", flush=True)
+    run_io("read", total_mb)
 
 print("[jenease] Workload complete.", flush=True)
 """

@@ -35,7 +35,7 @@ FIO_RW = {
     ("readwrite", "random"):     "randrw",
 }
 BLOCK_SIZE  = {"sequential": "1m",  "random": "4k"}
-IODEPTH     = {"sequential": 16,    "random": 32}
+IODEPTH     = {"sequential": 32,    "random": 64}
 NUMJOBS     = 4
 
 IO_IMAGE     = "quay.io/ocsci/nginx:latest"   # Alpine + fio 3.41 pre-installed
@@ -283,11 +283,13 @@ def _sync_create_io_workload(
             f"grep -v '^$' | while IFS= read -r l; do echo \"[PREFILL] $l\"; done && "
         )
 
+    per_job_gb = max(1, size_gb // NUMJOBS)
     cmd = (
-        f"echo '[jenease] Starting fio ({fio_rw}, bs={bs}, size={size_gb}GB)...' && "
+        f"echo '[jenease] Starting fio ({fio_rw}, bs={bs}, {NUMJOBS} jobs × {per_job_gb}GB, iodepth={iodepth})...' && "
         f"{prefill}"
         f"fio --name=jenease --ioengine=libaio --direct=1 "
-        f"--bs={bs} --numjobs={NUMJOBS} --iodepth={iodepth} --rw={fio_rw} --size={size_gb}g "
+        f"--bs={bs} --numjobs={NUMJOBS} --iodepth={iodepth} --rw={fio_rw} "
+        f"--size={per_job_gb}g "
         f"--filename=/data/testfile --fallocate=none "
         f"--status-interval=2 --group_reporting 2>&1 && "
         f"echo '[jenease] Workload complete.'"

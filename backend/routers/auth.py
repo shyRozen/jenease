@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from httpx import HTTPStatusError
 
@@ -20,6 +22,18 @@ async def login(body: LoginRequest, response: Response):
         raise HTTPException(status_code=502, detail="Jenkins unreachable")
     except Exception:
         raise HTTPException(status_code=502, detail="Jenkins unreachable")
+
+    # Warm the job catalog in the background using the authenticated user's token
+    async def _warm():
+        import routers.jobs as jobs_module
+        import time
+        try:
+            catalog = await jobs_module._build_catalog(client)
+            jobs_module._catalog = catalog
+            jobs_module._catalog_ts = time.time()
+        except Exception:
+            pass
+    asyncio.create_task(_warm())
 
     session_value = sign_session(body.username, body.token)
     response.set_cookie(

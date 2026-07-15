@@ -11,7 +11,7 @@ interface ClusterInfo {
   build_url: string
   building: boolean
   result: string | null
-  timestamp: number
+  timestamp: number | null
   ocp_version: string
   ocs_version: string
   credentials_conf: string
@@ -74,7 +74,7 @@ function PwField({ password }: { password?: string }) {
   )
 }
 
-export default function ClusterCard({ cluster }: { cluster: ClusterInfo }) {
+export default function ClusterCard({ cluster, isOwner = true }: { cluster: ClusterInfo; isOwner?: boolean }) {
   const { data: health, isLoading: healthLoading } = useQuery<HealthData>({
     queryKey: ['health', cluster.cluster_name],
     queryFn: () => api.get(`/clusters/${cluster.cluster_name}/health`),
@@ -176,8 +176,8 @@ export default function ClusterCard({ cluster }: { cluster: ClusterInfo }) {
 
       {/* Footer */}
       <div className="space-y-2">
-        {/* Abort button — only while building */}
-        {cluster.building && (
+        {/* Abort button — only while building and owner */}
+        {isOwner && cluster.building && (
           <div onClick={e => e.preventDefault()}>
             {abortState === 'done' ? (
               <p className="text-xs font-mono text-accent-amber">Abort sent — refreshing…</p>
@@ -219,7 +219,7 @@ export default function ClusterCard({ cluster }: { cluster: ClusterInfo }) {
             className="text-xs font-mono text-text-secondary hover:text-accent-cyan transition-colors">
             Jenkins #{cluster.build_num} ↗
           </a>
-          {!cluster.building && (
+          {isOwner && !cluster.building && (
             <button
               onClick={e => { e.preventDefault(); setDestroyOpen(true) }}
               className="text-xs font-mono text-accent-red/30 hover:text-accent-red transition-colors"

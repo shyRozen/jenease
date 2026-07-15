@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/client'
+import ClusterCard from '../components/ClusterCard'
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
@@ -51,20 +52,22 @@ const PLATFORM_COLORS: Record<string, string> = {
   other:     'border-surface-4 text-text-muted',
 }
 
-function clusterStatus(c: ClusterEntry): string {
+function jenkinsStatus(c: ClusterEntry): string {
   if (c.building) return 'Building'
-  if (c.result === 'SUCCESS') return 'Deployed'
   if (c.result === 'FAILURE') return 'Failed'
   if (c.result === 'ABORTED') return 'Aborted'
-  return 'Unknown'
+  return 'Active'   // result=SUCCESS or still in progress — real status from health query
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  Building: 'text-accent-cyan',
-  Deployed: 'text-accent-green',
-  Failed:   'text-accent-red',
-  Aborted:  'text-text-muted',
-  Unknown:  'text-text-muted',
+  Building:    'text-accent-cyan',
+  HEALTHY:     'text-accent-green',
+  DEGRADED:    'text-accent-amber',
+  UNREACHABLE: 'text-text-muted',
+  Failed:      'text-accent-red',
+  Aborted:     'text-text-muted',
+  LOADING:     'text-text-muted',
+  Active:      'text-text-muted',
 }
 
 function age(ts: number | null): string {
@@ -108,8 +111,28 @@ function Chips({ label, options, selected, onChange }: {
 function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
   const [open, setOpen] = useState(false)
   const platform = detectPlatform(c.credentials_conf, c.platform_conf)
-  const status = clusterStatus(c)
   const isMe = c.owner === me
+
+  const { data: health } = useQuery({
+    queryKey: ['health', c.cluster_name],
+    queryFn: () => api.get<{ status: string }>(`/clusters/${c.cluster_name}/health`),
+    enabled: !c.building,
+    staleTime: 30_000,
+    retry: false,
+  })
+
+  // Prefetch details once health resolves as reachable
+  useQuery({
+    queryKey: ['details', c.cluster_name],
+    queryFn: () => api.get(`/clusters/${c.cluster_name}/details`),
+    enabled: health?.status === 'HEALTHY' || health?.status === 'DEGRADED',
+    staleTime: 60_000,
+    retry: false,
+  })
+
+  const status = c.building ? 'Building'
+    : health ? health.status
+    : jenkinsStatus(c)
 
   return (
     <div className="border-b border-surface-4/50 last:border-0">
@@ -160,44 +183,7 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
   )
 }
 
-// ── cluster card (box view) ───────────────────────────────────────────────────
-
-function ClusterCard({ c, me }: { c: ClusterEntry; me: string }) {
-  const platform = detectPlatform(c.credentials_conf, c.platform_conf)
-  const status = clusterStatus(c)
-  const isMe = c.owner === me
-
-  return (
-    <Link to={`/clusters/${c.cluster_name}`}
-      className="card p-3 flex flex-col gap-2 hover:border-accent-cyan/40 transition-colors group block">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <p className="font-mono text-sm text-text-primary group-hover:text-accent-cyan transition-colors truncate">
-            {c.cluster_name}
-          </p>
-          <p className="text-[10px] font-mono text-text-muted mt-0.5">
-            {isMe ? 'mine' : c.owner} · {age(c.timestamp)}
-          </p>
-        </div>
-        <span className={`text-[10px] font-mono shrink-0 ${STATUS_COLORS[status]}`}>
-          {c.building && <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent-cyan animate-pulse mr-1" />}
-          {status}
-        </span>
-      </div>
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${PLATFORM_COLORS[platform] ?? PLATFORM_COLORS.other}`}>
-          {PLATFORM_LABELS[platform] ?? platform}
-        </span>
-        <span className="text-[10px] font-mono text-text-muted">OCP {c.ocp_version || '—'}</span>
-        <span className="text-[10px] font-mono text-text-muted">OCS {c.ocs_version || '—'}</span>
-      </div>
-      <div className="flex items-center gap-2 text-[10px] font-mono text-text-muted">
-        <span>{c.topology.masters}M + {c.topology.workers}W</span>
-        {c.osd_size && <span>· {c.osd_size}GB OSDs</span>}
-      </div>
-    </Link>
-  )
-}
+// Box view reuses ClusterCard which already handles health queries + prefetch
 
 // ── collapsible group ─────────────────────────────────────────────────────────
 
@@ -230,7 +216,7 @@ function sortClusters(list: ClusterEntry[], by: SortKey): ClusterEntry[] {
                               .localeCompare(detectPlatform(b.credentials_conf, b.platform_conf))
       case 'ocp':      return (b.ocp_version || '').localeCompare(a.ocp_version || '')
       case 'ocs':      return (b.ocs_version || '').localeCompare(a.ocs_version || '')
-      case 'status':   return clusterStatus(a).localeCompare(clusterStatus(b))
+      case 'status':   return jenkinsStatus(a).localeCompare(jenkinsStatus(b))
       default:         return 0
     }
   })
@@ -242,7 +228,7 @@ function groupClusters(list: ClusterEntry[], by: GroupKey): [string, ClusterEntr
   for (const c of list) {
     const key = by === 'owner'    ? c.owner
               : by === 'platform' ? (PLATFORM_LABELS[detectPlatform(c.credentials_conf, c.platform_conf)] ?? 'Other')
-              : by === 'status'   ? clusterStatus(c)
+              : by === 'status'   ? jenkinsStatus(c)
               : by === 'ocp'      ? (c.ocp_version || 'Unknown')
               : by === 'ocs'      ? (c.ocs_version || 'Unknown')
               : 'All'
@@ -276,7 +262,7 @@ export default function AllClusters({ username }: { username: string }) {
   , [clusters])
 
   const statuses = useMemo(() =>
-    [...new Set(clusters.map(clusterStatus))].sort()
+    [...new Set(clusters.map(jenkinsStatus))].sort()
   , [clusters])
 
   const owners = useMemo(() =>
@@ -298,7 +284,7 @@ export default function AllClusters({ username }: { username: string }) {
     if (platformFilter.size)
       list = list.filter(c => platformFilter.has(PLATFORM_LABELS[detectPlatform(c.credentials_conf, c.platform_conf)] ?? 'Other'))
     if (statusFilter.size)
-      list = list.filter(c => statusFilter.has(clusterStatus(c)))
+      list = list.filter(c => statusFilter.has(jenkinsStatus(c)))
     if (ownerFilter.size)
       list = list.filter(c => ownerFilter.has(c.owner))
     return list
@@ -403,7 +389,9 @@ export default function AllClusters({ username }: { username: string }) {
                   <p className="text-[9px] font-mono text-text-muted uppercase tracking-widest mb-2">{label} ({items.length})</p>
                 )}
                 <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-                  {items.map(c => <ClusterCard key={c.cluster_name} c={c} me={username} />)}
+                  {items.map(c => (
+                    <ClusterCard key={c.cluster_name} cluster={c} isOwner={c.owner === username} />
+                  ))}
                 </div>
               </div>
             ))}

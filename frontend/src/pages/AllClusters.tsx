@@ -189,7 +189,7 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
               ↓ kubeconfig
             </a>
           )}
-          {isMe && !c.building && (
+          {isMe && (
             <button
               onClick={() => setDestroyOpen(true)}
               className="text-[10px] font-mono text-accent-red/50 hover:text-accent-red border border-accent-red/30 hover:border-accent-red px-1.5 rounded transition-colors"

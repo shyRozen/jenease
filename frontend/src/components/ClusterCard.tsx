@@ -219,7 +219,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
             className="text-xs font-mono text-text-secondary hover:text-accent-cyan transition-colors">
             Jenkins #{cluster.build_num} ↗
           </a>
-          {isOwner && !cluster.building && (
+          {isOwner && (
             <button
               onClick={e => { e.preventDefault(); setDestroyOpen(true) }}
               className="text-xs font-mono text-accent-red/30 hover:text-accent-red transition-colors"

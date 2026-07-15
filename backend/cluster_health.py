@@ -60,7 +60,7 @@ def _query_osd_iops(api_url: str, token: str, proxy_url: Optional[str] = None) -
     osd_iops: dict = {}
     try:
         for op, metric in [('r', 'ceph_osd_op_r'), ('w', 'ceph_osd_op_w')]:
-            query = _up.quote(f'irate({metric}[2m])')
+            query = _up.quote(f'irate({metric}[15s])')
             with httpx.Client(verify=False, proxy=proxy_url, timeout=5) as c:
                 r = c.get(f"{thanos}?query={query}", headers=headers)
                 data = r.json()

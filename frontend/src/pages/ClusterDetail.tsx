@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { api } from '../api/client'
 import WorkloadPanel from '../components/WorkloadPanel'
@@ -261,17 +261,12 @@ function PodSwimlane({ label, pods }: { label: string; pods: Pod[] }) {
 
 export default function ClusterDetail() {
   const { name } = useParams<{ name: string }>()
-  const queryClient = useQueryClient()
-
   const { data: health } = useQuery<HealthData>({
     queryKey: ['health', name],
     queryFn: () => api.get(`/clusters/${name}/health`),
-    staleTime: 2_000,
+    staleTime: 3_000,
     retry: false,
-    refetchInterval: () => {
-      const workloads = queryClient.getQueryData<any[]>(['workloads', name])
-      return workloads?.some(w => w.phase === 'Running') ? 2_000 : 30_000
-    },
+    refetchInterval: 3_000,
   })
 
   const { data: details, isLoading: detailsLoading } = useQuery<DetailsData>({

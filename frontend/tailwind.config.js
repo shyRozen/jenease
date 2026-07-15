@@ -24,7 +24,7 @@ export default {
         text: {
           primary: '#e6edf3',
           secondary: '#8b949e',
-          muted: '#484f58',
+          muted: '#6e7681',
         },
       },
       boxShadow: {

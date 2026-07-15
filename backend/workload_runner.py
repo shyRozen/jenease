@@ -110,51 +110,74 @@ print('[jenease] Workload complete.', flush=True)
 
 # NooBaa boto3 script injected via pod command
 _NOOBAA_SCRIPT = """
-import boto3, os, time
+import boto3, os, time, threading
 import urllib3; urllib3.disable_warnings()
 
-endpoint = os.environ["S3_ENDPOINT"]
-key_id   = os.environ["ACCESS_KEY"]
-secret   = os.environ["SECRET_KEY"]
-bucket   = os.environ["BUCKET_NAME"]
-size_gb  = int(os.environ.get("SIZE_GB", "1"))
-mode     = os.environ.get("MODE", "write")
+endpoint  = os.environ["S3_ENDPOINT"]
+key_id    = os.environ["ACCESS_KEY"]
+secret    = os.environ["SECRET_KEY"]
+bucket    = os.environ["BUCKET_NAME"]
+size_gb   = int(os.environ.get("SIZE_GB", "1"))
+mode      = os.environ.get("MODE", "write")
 
-s3 = boto3.client("s3", endpoint_url=endpoint,
-                  aws_access_key_id=key_id, aws_secret_access_key=secret,
-                  verify=False)
+WORKERS    = 8
+OBJ_SIZE   = 64 * 1024 * 1024   # 64 MB per object
+total_objs = max(1, size_gb * 1024 * 1024 * 1024 // OBJ_SIZE)
+chunk      = b"x" * OBJ_SIZE
+
+def make_s3():
+    return boto3.client("s3", endpoint_url=endpoint,
+                        aws_access_key_id=key_id, aws_secret_access_key=secret,
+                        verify=False)
+
+s3 = make_s3()
 try:
     s3.create_bucket(Bucket=bucket)
 except Exception:
     pass
 
-chunk    = b"x" * (1024 * 1024)   # 1 MB
-total_mb = size_gb * 1024
+def run_io(op):
+    label   = "WRITE" if op == "write" else "READ"
+    rwtag   = "w"     if op == "write" else "r"
+    start   = time.time()
+    done    = [0]
+    lock    = threading.Lock()
+    last_p  = [start]
 
-def run_io(op, total):
-    label  = "WRITE" if op == "write" else "READ"
-    rwtag  = "w"     if op == "write" else "r"
-    start  = time.time()
-    last   = start
-    for i in range(total):
-        if op == "write":
-            s3.put_object(Bucket=bucket, Key=f"obj-{i:06d}", Body=chunk)
-        else:
-            s3.get_object(Bucket=bucket, Key=f"obj-{i:06d}")["Body"].read()
-        now = time.time()
-        if now - last >= 1.0 or i == total - 1:
-            pct    = (i + 1) / total * 100
-            rate   = (i + 1) / max(0.001, now - start)   # MB/s
-            eta_s  = int((total - i - 1) / max(0.001, rate))
-            eta    = f"{eta_s // 60}m{eta_s % 60:02d}s" if eta_s > 60 else f"{eta_s}s"
-            print(f"[{label}][{pct:.1f}%][{rwtag}={rate:.0f}MB/s][eta {eta}]", flush=True)
-            last = now
+    def worker(client, indices):
+        for i in indices:
+            if op == "write":
+                client.put_object(Bucket=bucket, Key=f"obj-{i:06d}", Body=chunk)
+            else:
+                client.get_object(Bucket=bucket, Key=f"obj-{i:06d}")["Body"].read()
+            with lock:
+                done[0] += 1
+                now = time.time()
+                if now - last_p[0] >= 1.0 or done[0] == total_objs:
+                    pct   = done[0] / total_objs * 100
+                    mb    = done[0] * OBJ_SIZE / 1024 / 1024
+                    rate  = mb / max(0.001, now - start)
+                    eta_s = int((total_objs - done[0]) * OBJ_SIZE / 1024 / 1024 / max(0.001, rate))
+                    eta   = f"{eta_s // 60}m{eta_s % 60:02d}s" if eta_s > 60 else f"{eta_s}s"
+                    print(f"[{label}][{pct:.1f}%][{rwtag}={rate:.0f}MB/s][eta {eta}]", flush=True)
+                    last_p[0] = now
+
+    # Split work across workers
+    per = [list(range(i, total_objs, WORKERS)) for i in range(WORKERS)]
+    clients = [make_s3() for _ in range(WORKERS)]
+    threads = [threading.Thread(target=worker, args=(clients[i], per[i])) for i in range(WORKERS)]
+    for t in threads: t.start()
+    for t in threads: t.join()
 
 if mode in ("write", "readwrite"):
-    run_io("write", total_mb)
+    print(f"[jenease] Writing {size_gb}GB ({total_objs} × {OBJ_SIZE//1024//1024}MB, {WORKERS} workers)...", flush=True)
+    run_io("write")
+    print("[jenease] Write complete.", flush=True)
 
 if mode in ("read", "readwrite"):
-    run_io("read", total_mb)
+    print(f"[jenease] Reading {size_gb}GB ({total_objs} × {OBJ_SIZE//1024//1024}MB, {WORKERS} workers)...", flush=True)
+    run_io("read")
+    print("[jenease] Read complete.", flush=True)
 
 print("[jenease] Workload complete.", flush=True)
 """

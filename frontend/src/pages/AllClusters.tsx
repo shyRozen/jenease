@@ -141,12 +141,12 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
           className="text-text-muted hover:text-text-primary text-xs w-4 shrink-0">
           {open ? '▾' : '▸'}
         </button>
-        <Link to={`/clusters/${c.cluster_name}`} className="flex-1 flex items-center gap-3 min-w-0">
-          <span className="font-mono text-xs text-text-primary group-hover:text-accent-cyan transition-colors truncate">
+        <Link to={`/clusters/${c.cluster_name}`} className="flex-1 flex items-center gap-2 min-w-0">
+          <span className="font-mono text-xs text-text-primary group-hover:text-accent-cyan transition-colors truncate w-36 shrink-0">
             {c.cluster_name}
           </span>
-          {!isMe && <span className="text-[9px] font-mono text-text-muted shrink-0">{c.owner}</span>}
-          <span className={`text-[10px] font-mono shrink-0 ${STATUS_COLORS[status]}`}>
+          {!isMe && <span className="text-[9px] font-mono text-text-muted shrink-0 w-16 truncate">{c.owner}</span>}
+          <span className={`text-[10px] font-mono shrink-0 w-20 ${STATUS_COLORS[status]}`}>
             {c.building && <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent-cyan animate-pulse mr-1" />}
             {status}
           </span>
@@ -155,15 +155,28 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
           </span>
           <span className="text-[10px] font-mono text-text-muted shrink-0">OCP {c.ocp_version || '—'}</span>
           <span className="text-[10px] font-mono text-text-muted shrink-0">OCS {c.ocs_version || '—'}</span>
+          <span className="text-[10px] font-mono text-text-muted shrink-0">{c.topology.masters}M+{c.topology.workers}W</span>
           <span className="text-[10px] font-mono text-text-muted ml-auto shrink-0">{age(c.timestamp)}</span>
-          <span className="text-[10px] font-mono text-text-muted shrink-0">
-            {c.topology.masters}M+{c.topology.workers}W
-          </span>
         </Link>
-        <a href={c.build_url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
-          className="text-[10px] font-mono text-text-muted hover:text-accent-cyan shrink-0">
-          #{c.build_num}↗
-        </a>
+        {/* Links always visible in row */}
+        <div className="flex items-center gap-2 shrink-0" onClick={e => e.preventDefault()}>
+          {c.console_url && (
+            <a href={c.console_url} target="_blank" rel="noreferrer"
+              className="text-[10px] font-mono text-text-muted hover:text-accent-cyan transition-colors">
+              Console↗
+            </a>
+          )}
+          {c.logs_url && (
+            <a href={c.logs_url} target="_blank" rel="noreferrer"
+              className="text-[10px] font-mono text-text-muted hover:text-accent-cyan transition-colors">
+              Logs↗
+            </a>
+          )}
+          <a href={c.build_url} target="_blank" rel="noreferrer"
+            className="text-[10px] font-mono text-text-muted hover:text-accent-cyan transition-colors">
+            #{c.build_num}↗
+          </a>
+        </div>
       </div>
       {open && (
         <div className="px-10 py-2 bg-surface-2/30 border-t border-surface-4/30 flex items-center gap-4 flex-wrap">

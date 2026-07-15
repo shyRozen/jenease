@@ -1,4 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
+import { useEffect } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Navigate, Route, BrowserRouter as Router, Routes } from 'react-router-dom'
 import { api } from './api/client'
 import Layout from './components/Layout'
@@ -17,6 +18,47 @@ function Placeholder({ title }: { title: string }) {
       <p className="text-text-muted text-sm font-mono mt-2">Coming in the next phase…</p>
     </div>
   )
+}
+
+function PrefetchManager({ username }: { username: string }) {
+  const queryClient = useQueryClient()
+
+  useEffect(() => {
+    // Step 1: fetch all clusters list
+    queryClient.fetchQuery<any[]>({
+      queryKey: ['all-clusters'],
+      queryFn: () => api.get('/clusters/all'),
+      staleTime: 30_000,
+    }).then(clusters => {
+      if (!clusters?.length) return
+
+      // Step 2: stagger health prefetches across all clusters (100ms apart)
+      // so we don't hammer the backend with 50+ simultaneous k8s connections
+      clusters.forEach((c: any, i: number) => {
+        if (c.building) return
+        setTimeout(() => {
+          queryClient.fetchQuery<{ status: string }>({
+            queryKey: ['health', c.cluster_name],
+            queryFn: () => api.get(`/clusters/${c.cluster_name}/health`),
+            staleTime: 30_000,
+          }).then(health => {
+            // Step 3: for reachable clusters prefetch full details
+            if (health?.status === 'HEALTHY' || health?.status === 'DEGRADED') {
+              queryClient.prefetchQuery({
+                queryKey: ['details', c.cluster_name],
+                queryFn: () => api.get(`/clusters/${c.cluster_name}/details`),
+                staleTime: 60_000,
+              })
+            }
+          }).catch(() => {})
+        }, i * 150) // 150ms between each cluster — 50 clusters = 7.5s total spread
+      })
+    }).catch(() => {})
+  // Run once per session (user identity change)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [username])
+
+  return null
 }
 
 function App() {
@@ -40,6 +82,7 @@ function App() {
 
   return (
     <Router>
+      <PrefetchManager username={user.username} />
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<Navigate to="/clusters" replace />} />

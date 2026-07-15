@@ -229,6 +229,11 @@ async def trigger_job(body: TriggerRequest, session: dict = Depends(get_session)
         else:
             params["CREDENTIALS_CONF"] = VSPHERE_CREDS
 
+    # Normalize booleans to lowercase strings — Jenkins rejects True/False
+    params = {
+        k: ("true" if v is True else "false" if v is False else v)
+        for k, v in params.items()
+    }
     # Remove empty/None values but keep explicit "false" strings
     params = {k: v for k, v in params.items() if v not in (None, "")}
 

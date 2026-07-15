@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
-import ThroughputChart, { type DataPoint } from './ThroughputChart'
+import ThroughputChart, { type DataPoint, SERIES } from './ThroughputChart'
 
 interface WorkloadEntry {
   id: number
@@ -380,9 +380,6 @@ export default function WorkloadPanel({
       )}
 
       {showList && workloads.length > 0 && (() => {
-        const types = ['rbd', 'cephfs', 'noobaa'] as const
-        const typeLabel: Record<string, string> = { rbd: 'RBD', cephfs: 'CephFS', noobaa: 'NooBaa' }
-        const typeColor: Record<string, string> = { rbd: 'text-accent-cyan', cephfs: 'text-accent-green', noobaa: 'text-accent-amber' }
         const byType: Record<string, number> = {}
         let total = 0
         for (const w of workloads) {
@@ -391,20 +388,20 @@ export default function WorkloadPanel({
           total += r
         }
         const hasAny = total > 0
+        const colorMap = Object.fromEntries(SERIES.map(s => [s.key, s.color]))
         return hasAny ? (
-          <div className="border border-surface-4 rounded-lg px-3 py-2 bg-surface-2/40 space-y-1">
-            <p className="text-[9px] font-mono text-text-muted uppercase tracking-widest">Throughput</p>
+          <div className="border border-surface-4 rounded-lg px-3 py-2 bg-surface-2/40">
             <div className="flex flex-wrap gap-x-4 gap-y-0.5">
-              {types.filter(t => byType[t]).map(t => (
-                <span key={t} className="text-[10px] font-mono">
-                  <span className="text-text-muted">{typeLabel[t]} </span>
-                  <span className={typeColor[t]}>{byType[t].toFixed(0)} MB/s</span>
+              {SERIES.filter(s => s.key !== 'total' && byType[s.key]).map(s => (
+                <span key={s.key} className="text-[10px] font-mono">
+                  <span className="text-text-muted">{s.label} </span>
+                  <span style={{ color: s.color }}>{(byType[s.key] ?? 0).toFixed(0)} MB/s</span>
                 </span>
               ))}
               {total > 0 && (
                 <span className="text-[10px] font-mono ml-auto">
                   <span className="text-text-muted">Total </span>
-                  <span className="text-text-primary font-semibold">{total.toFixed(0)} MB/s</span>
+                  <span style={{ color: colorMap.total }} className="font-semibold">{total.toFixed(0)} MB/s</span>
                 </span>
               )}
             </div>

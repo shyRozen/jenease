@@ -9,13 +9,14 @@ export interface DataPoint {
 }
 
 const VISIBLE_SECS = 60
-const PAD = { top: 8, right: 8, bottom: 20, left: 44 }
+const CHART_H      = 176
+const PAD = { top: 10, right: 8, bottom: 20, left: 44 }
 
-const SERIES = [
+export const SERIES = [
   { key: 'rbd'    as const, label: 'RBD',    color: '#00d4ff', dash: ''    },
-  { key: 'cephfs' as const, label: 'CephFS', color: '#00ff9d', dash: ''    },
-  { key: 'noobaa' as const, label: 'NooBaa', color: '#ffb700', dash: ''    },
-  { key: 'total'  as const, label: 'Total',  color: '#e6edf3', dash: '4,2' },
+  { key: 'cephfs' as const, label: 'CephFS', color: '#50fa7b', dash: ''    },
+  { key: 'noobaa' as const, label: 'NooBaa', color: '#ff9f43', dash: ''    },
+  { key: 'total'  as const, label: 'Total',  color: '#f8f8f2', dash: '4,2' },
 ] as const
 
 function niceMax(v: number) {
@@ -49,7 +50,7 @@ export default function ThroughputChart({ data }: { data: DataPoint[] }) {
   }, [data.length])
 
   const W = width - PAD.left - PAD.right
-  const H = 88 - PAD.top - PAD.bottom   // plot area height
+  const H = CHART_H - PAD.top - PAD.bottom
 
   const nowMs   = data.length > 0 ? data[data.length - 1].ts : Date.now()
   const endMs   = nowMs - offset * 1000
@@ -136,7 +137,7 @@ export default function ThroughputChart({ data }: { data: DataPoint[] }) {
 
       <svg
         width={width}
-        height={88}
+        height={CHART_H}
         className="cursor-grab active:cursor-grabbing rounded"
         style={{ background: '#0d1117' }}
         onPointerDown={onPointerDown}

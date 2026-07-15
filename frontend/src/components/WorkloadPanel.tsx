@@ -91,8 +91,8 @@ function WorkloadCard({
         }
       }
     }
-    es.onerror = () => es.close()
-    return () => { es.close(); esRef.current = null }
+    es.onerror = () => { es.close(); onRateUpdate?.(workload.id, null) }
+    return () => { es.close(); esRef.current = null; onRateUpdate?.(workload.id, null) }
   }, [workload.id, isActive, cleaning, clusterName])
 
   useEffect(() => {

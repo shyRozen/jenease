@@ -98,7 +98,7 @@ export default function ThroughputChart({ data }: { data: DataPoint[] }) {
   }
   function onPointerMove(e: React.PointerEvent) {
     if (!isDragging.current) return
-    const dx = dragStartX.current - e.clientX
+    const dx = e.clientX - dragStartX.current   // positive = drag right = show past
     const secsMoved = (dx / W) * VISIBLE_SECS
     const maxPast = Math.max(0, (data.length - 1))
     const newOffset = Math.max(0, Math.min(dragStartOffset.current + secsMoved, maxPast))

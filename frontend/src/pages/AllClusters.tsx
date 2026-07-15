@@ -23,6 +23,7 @@ interface ClusterEntry {
   topology: { masters: number; workers: number }
   console_url?: string
   logs_url?: string
+  kubeconfig_url?: string
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -161,8 +162,8 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
           <span className="text-[10px] font-mono text-text-muted shrink-0">{c.topology.masters}M+{c.topology.workers}W</span>
           <span className="text-[10px] font-mono text-text-muted ml-auto shrink-0">{age(c.timestamp)}</span>
         </Link>
-        {/* Links always visible in row */}
-        <div className="flex items-center gap-2 shrink-0" onClick={e => e.preventDefault()}>
+        {/* All action buttons — same as box view */}
+        <div className="flex items-center gap-2 shrink-0" onClick={e => e.stopPropagation()}>
           {c.console_url && (
             <a href={c.console_url} target="_blank" rel="noreferrer"
               className="text-[10px] font-mono text-text-muted hover:text-accent-cyan transition-colors">
@@ -177,24 +178,29 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
           )}
           <a href={c.build_url} target="_blank" rel="noreferrer"
             className="text-[10px] font-mono text-text-muted hover:text-accent-cyan transition-colors">
-            #{c.build_num}↗
+            Jenkins #{c.build_num}↗
           </a>
+          {c.kubeconfig_url && (
+            <a
+              href={`/api/clusters/${c.cluster_name}/kubeconfig`}
+              download={`kubeconfig-${c.cluster_name}`}
+              className="text-[10px] font-mono text-accent-green hover:brightness-125 transition-colors"
+            >
+              ↓ kubeconfig
+            </a>
+          )}
           {isMe && !c.building && (
             <button
-              onClick={e => { e.preventDefault(); setDestroyOpen(true) }}
-              className="text-[10px] font-mono text-accent-red/30 hover:text-accent-red transition-colors"
+              onClick={() => setDestroyOpen(true)}
+              className="text-[10px] font-mono text-accent-red/50 hover:text-accent-red border border-accent-red/30 hover:border-accent-red px-1.5 rounded transition-colors"
             >
-              ✕
+              ✕ Destroy
             </button>
           )}
         </div>
       </div>
       {open && (
         <div className="px-10 py-2 bg-surface-2/30 border-t border-surface-4/30 flex items-center gap-4 flex-wrap">
-          {c.console_url && <a href={c.console_url} target="_blank" rel="noreferrer"
-            className="text-[10px] font-mono text-text-secondary hover:text-accent-cyan">Console ↗</a>}
-          {c.logs_url && <a href={c.logs_url} target="_blank" rel="noreferrer"
-            className="text-[10px] font-mono text-text-secondary hover:text-accent-cyan">Logs ↗</a>}
           <span className="text-[10px] font-mono text-text-muted">OSD {c.osd_size || '—'} GB</span>
           {c.platform_conf && <span className="text-[10px] font-mono text-text-muted truncate max-w-xs">{c.platform_conf}</span>}
           <Link to={`/clusters/${c.cluster_name}`}

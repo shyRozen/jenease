@@ -199,6 +199,7 @@ async def cluster_health(cluster_name: str, session: dict = Depends(get_session)
         "ceph_capacity": health.get("ceph_capacity"),
         "ocp_full_version": health.get("ocp_full_version"),
         "odf_full_version": health.get("odf_full_version"),
+        "osd_iops": health.get("osd_iops"),
     }
 
 

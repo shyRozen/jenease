@@ -13,6 +13,7 @@ from routers import clusters as clusters_router
 from routers import agents as agents_router
 from routers import names as names_router
 from routers import jobs as jobs_router
+from routers import workloads as workloads_router
 from routers.jobs import _build_catalog, _catalog, _catalog_ts
 import routers.jobs as jobs_module
 
@@ -65,6 +66,7 @@ app.include_router(clusters_router.router)
 app.include_router(agents_router.router)
 app.include_router(names_router.router)
 app.include_router(jobs_router.router)
+app.include_router(workloads_router.router)
 
 
 @app.get("/api/health")

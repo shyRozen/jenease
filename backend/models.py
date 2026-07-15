@@ -6,6 +6,21 @@ from typing import Optional
 from sqlmodel import Field, SQLModel
 
 
+class Workload(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    cluster_name: str = Field(index=True)
+    username: str
+    workload_type: str        # rbd, cephfs, noobaa
+    namespace: str
+    pod_name: str
+    pvc_name: str
+    size_gb: int
+    mode: str                 # read, write, readwrite
+    pattern: str              # sequential, random
+    kubeconfig_url: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class Preset(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(index=True)

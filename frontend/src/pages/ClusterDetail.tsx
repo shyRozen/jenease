@@ -1,6 +1,7 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { api } from '../api/client'
+import WorkloadPanel from '../components/WorkloadPanel'
 
 // ── types ──────────────────────────────────────────────────────────────────
 
@@ -37,6 +38,7 @@ interface HealthData {
   ceph_capacity?: CephCapacity
   ocp_full_version?: string
   odf_full_version?: string
+  osd_iops?: Record<string, { r?: number; w?: number }>
 }
 
 interface DetailsData {
@@ -138,8 +140,9 @@ function OsdCapacityBar({ capacity }: { capacity: CephCapacity }) {
   )
 }
 
-function OsdGrid({ count, up, osdSize, capacity }: {
+function OsdGrid({ count, up, osdSize, capacity, iops }: {
   count: number; up: number; osdSize?: string; capacity?: CephCapacity
+  iops?: Record<string, { r?: number; w?: number }>
 }) {
   const perOsdBytes = capacity?.bytes_total ? capacity.bytes_total / count : 0
   const perOsdUsed = capacity?.bytes_used ? capacity.bytes_used / count : 0
@@ -151,9 +154,12 @@ function OsdGrid({ count, up, osdSize, capacity }: {
       <p className="text-[9px] font-mono text-text-muted uppercase tracking-widest mb-2">OSDs</p>
       <div className="flex flex-wrap gap-2">
         {Array.from({ length: count }).map((_, i) => {
-          const isUp = i < up
+          const isUp   = up <= 0 || i < up
+          const osdIo  = iops?.[String(i)]
+          const rIops  = osdIo?.r ?? null
+          const wIops  = osdIo?.w ?? null
           return (
-            <div key={i} className={`border rounded p-2 w-28 space-y-1.5 ${isUp ? 'border-surface-4 bg-surface-2' : 'border-accent-red/30 bg-accent-red/5'}`}>
+            <div key={i} className="border border-accent-cyan/20 bg-accent-cyan/5 rounded p-2 w-28 space-y-1.5">
               {/* OSD label + status dot */}
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-mono text-text-secondary">OSD {i}</span>
@@ -165,12 +171,27 @@ function OsdGrid({ count, up, osdSize, capacity }: {
               </p>
               {/* Mini capacity bar */}
               {perOsdBytes > 0 && (
-                <div className="h-1 bg-surface-3 rounded-full overflow-hidden">
+                <div className="h-1 bg-surface-4 rounded-full overflow-hidden">
                   <div className={`h-full rounded-full ${barColor}`} style={{ width: `${usedPct}%` }} />
                 </div>
               )}
               {perOsdBytes > 0 && (
-                <p className="text-[9px] font-mono text-text-muted">{usedPct}% used</p>
+                <p className="text-[9px] font-mono text-text-secondary">{usedPct}% used</p>
+              )}
+              {/* IOPS */}
+              {(rIops !== null || wIops !== null) && (
+                <div className="space-y-0.5 pt-0.5 border-t border-accent-cyan/10">
+                  {rIops !== null && (
+                    <p className="text-[9px] font-mono text-text-muted">
+                      R <span className="text-accent-cyan">{rIops.toLocaleString()}</span> iops
+                    </p>
+                  )}
+                  {wIops !== null && (
+                    <p className="text-[9px] font-mono text-text-muted">
+                      W <span className="text-accent-cyan">{wIops.toLocaleString()}</span> iops
+                    </p>
+                  )}
+                </div>
               )}
             </div>
           )
@@ -240,12 +261,17 @@ function PodSwimlane({ label, pods }: { label: string; pods: Pod[] }) {
 
 export default function ClusterDetail() {
   const { name } = useParams<{ name: string }>()
+  const queryClient = useQueryClient()
 
   const { data: health } = useQuery<HealthData>({
     queryKey: ['health', name],
     queryFn: () => api.get(`/clusters/${name}/health`),
-    staleTime: 60_000,
+    staleTime: 2_000,
     retry: false,
+    refetchInterval: () => {
+      const workloads = queryClient.getQueryData<any[]>(['workloads', name])
+      return workloads?.some(w => w.phase === 'Running') ? 2_000 : 30_000
+    },
   })
 
   const { data: details, isLoading: detailsLoading } = useQuery<DetailsData>({
@@ -388,15 +414,23 @@ export default function ClusterDetail() {
               <OsdCapacityBar capacity={health.ceph_capacity} />
             ) : null}
 
-            {/* Individual OSD tiles */}
-            {health?.osd_count ? (
-              <OsdGrid
-                count={health.osd_count}
-                up={health.osd_up ?? health.osd_count}
-                osdSize={cluster?.osd_size}
-                capacity={health.ceph_capacity}
-              />
-            ) : null}
+            <div className="grid grid-cols-2 gap-6 items-start">
+              {/* Left: OSD tiles + active workloads below */}
+              <div className="space-y-4">
+                {health?.osd_count ? (
+                  <OsdGrid
+                    count={health.osd_count}
+                    up={health.osd_up ?? health.osd_count}
+                    osdSize={cluster?.osd_size}
+                    capacity={health.ceph_capacity}
+                    iops={health.osd_iops}
+                  />
+                ) : null}
+                <WorkloadPanel clusterName={name!} showLauncher={false} />
+              </div>
+              {/* Right: launcher form only */}
+              <WorkloadPanel clusterName={name!} showList={false} />
+            </div>
           </div>
         </section>
       )}

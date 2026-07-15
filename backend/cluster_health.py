@@ -20,7 +20,7 @@ def _extract_cluster_domain(console_url: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-async def _get_oauth_token(api_url: str, password: str) -> Optional[str]:
+async def _get_oauth_token(api_url: str, password: str, proxy_url: Optional[str] = None) -> Optional[str]:
     """Get a Bearer token via OCP OAuth using kubeadmin credentials."""
     oauth_url = api_url.replace('api.', 'oauth-openshift.apps.', 1).replace(':6443', '')
     authorize_url = f"{oauth_url}/oauth/authorize"
@@ -28,7 +28,10 @@ async def _get_oauth_token(api_url: str, password: str) -> Optional[str]:
         'client_id': 'openshift-challenging-client',
         'response_type': 'token',
     }
-    async with httpx.AsyncClient(verify=False, follow_redirects=False, timeout=15.0) as c:
+    client_kwargs: dict = dict(verify=False, follow_redirects=False, timeout=15.0)
+    if proxy_url:
+        client_kwargs['proxy'] = proxy_url
+    async with httpx.AsyncClient(**client_kwargs) as c:
         try:
             r = await c.get(
                 authorize_url,
@@ -46,7 +49,33 @@ async def _get_oauth_token(api_url: str, password: str) -> Optional[str]:
     return None
 
 
-def _sync_query_with_token(api_url: str, token: str) -> dict:
+def _query_osd_iops(api_url: str, token: str, proxy_url: Optional[str] = None) -> dict:
+    """Query Thanos external route for per-OSD IOPS via squid proxy + OAuth token."""
+    import urllib.parse as _up
+
+    cluster_domain = api_url.replace('https://api.', '').replace(':6443', '')
+    thanos = f"https://thanos-querier-openshift-monitoring.apps.{cluster_domain}/api/v1/query"
+    headers = {'Authorization': f'Bearer {token}'}
+
+    osd_iops: dict = {}
+    try:
+        for op, metric in [('r', 'ceph_osd_op_r'), ('w', 'ceph_osd_op_w')]:
+            query = _up.quote(f'irate({metric}[2m])')
+            with httpx.Client(verify=False, proxy=proxy_url, timeout=5) as c:
+                r = c.get(f"{thanos}?query={query}", headers=headers)
+                data = r.json()
+            for item in data.get('data', {}).get('result', []):
+                daemon = item['metric'].get('ceph_daemon', '')
+                if daemon.startswith('osd.'):
+                    osd_id = int(daemon.split('.')[1])
+                    osd_iops.setdefault(osd_id, {})
+                    osd_iops[osd_id][op] = int(float(item['value'][1]))
+    except Exception:
+        return {}
+    return {'osd_iops': osd_iops} if osd_iops else {}
+
+
+def _sync_query_with_token(api_url: str, token: str, proxy_url: Optional[str] = None) -> dict:
     """Query nodes + ODF using a Bearer token. Runs in thread pool."""
     from kubernetes import client
 
@@ -54,6 +83,8 @@ def _sync_query_with_token(api_url: str, token: str) -> dict:
     cfg.host = api_url
     cfg.verify_ssl = False
     cfg.api_key = {'authorization': f'Bearer {token}'}
+    if proxy_url:
+        cfg.proxy = proxy_url
     api_client = client.ApiClient(cfg)
 
     result: dict = {'nodes': [], 'odf': {}, 'osd_count': 0}
@@ -157,6 +188,8 @@ def _sync_query_with_token(api_url: str, token: str) -> dict:
     except Exception:
         pass
 
+    proxy = getattr(cfg, 'proxy', None)
+    result.update(_query_osd_iops(api_url, token, proxy))
     return result
 
 
@@ -280,6 +313,8 @@ def _sync_query_with_kubeconfig(kubeconfig_str: str) -> dict:
     except Exception:
         pass
 
+    # IOPS: kubeconfig path has no token; Prometheus requires OAuth. Skip here —
+    # fetch_cluster_health tries OAuth+proxy first and calls _sync_query_with_token.
     return result
 
 
@@ -303,8 +338,43 @@ async def fetch_cluster_health(
             async with httpx.AsyncClient(timeout=10.0) as c:
                 r = await c.get(kubeconfig_url)
                 if r.is_success and 'not available' not in r.text.lower():
+                    kubeconfig_text = r.text
+                    kube_dict = yaml.safe_load(kubeconfig_text)
+
+                    # Extract proxy and api_url from kubeconfig
+                    kube_proxy = None
+                    kube_api_url = None
+                    for entry in kube_dict.get('clusters', []):
+                        c_data = entry.get('cluster', {})
+                        kube_proxy = c_data.get('proxy-url')
+                        kube_api_url = c_data.get('server')
+                        break
+
+                    # Try to get OAuth token through the proxy (enables Prometheus IOPS)
+                    kube_token = None
+                    if kube_proxy and kube_api_url and kubeadmin_password:
+                        kube_token = await _get_oauth_token(
+                            kube_api_url, kubeadmin_password, proxy_url=kube_proxy
+                        )
+
+                    if kube_token and kube_api_url:
+                        # Use Bearer token path (has Prometheus access) + proxy
+                        try:
+                            result = await asyncio.wait_for(
+                                loop.run_in_executor(
+                                    None, _sync_query_with_token,
+                                    kube_api_url, kube_token, kube_proxy
+                                ),
+                                timeout=K8S_TIMEOUT,
+                            )
+                            if result and result.get('nodes'):
+                                return result
+                        except (asyncio.TimeoutError, Exception):
+                            pass
+
+                    # Fallback: kubeconfig cert auth (no Prometheus IOPS)
                     result = await asyncio.wait_for(
-                        loop.run_in_executor(None, _sync_query_with_kubeconfig, r.text),
+                        loop.run_in_executor(None, _sync_query_with_kubeconfig, kubeconfig_text),
                         timeout=K8S_TIMEOUT,
                     )
                     if result and result.get('nodes'):

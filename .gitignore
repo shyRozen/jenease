@@ -3,7 +3,7 @@
 backend/.env
 
 # Backend
-backend/data/*.db
+backend/data/
 backend/__pycache__/
 backend/**/__pycache__/
 backend/*.pyc

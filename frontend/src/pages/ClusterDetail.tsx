@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { api } from '../api/client'
 import WorkloadPanel from '../components/WorkloadPanel'
@@ -262,6 +262,9 @@ function PodSwimlane({ label, pods }: { label: string; pods: Pod[] }) {
 
 export default function ClusterDetail() {
   const { name } = useParams<{ name: string }>()
+  const queryClient = useQueryClient()
+  const me = (queryClient.getQueryData<{ username: string }>(['me']))?.username ?? ''
+  const isOwner = !!name && name.toLowerCase().startsWith(me.toLowerCase())
   const { data: health } = useQuery<HealthData>({
     queryKey: ['health', name],
     queryFn: () => api.get(`/clusters/${name}/health`),
@@ -429,8 +432,8 @@ export default function ClusterDetail() {
                 ) : null}
                 <WorkloadPanel clusterName={name!} showLauncher={false} />
               </div>
-              {/* Right: launcher form only */}
-              <WorkloadPanel clusterName={name!} showList={false} />
+              {/* Right: launcher form — only for cluster owner */}
+              {isOwner && <WorkloadPanel clusterName={name!} showList={false} />}
             </div>
           </div>
         </section>

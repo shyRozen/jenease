@@ -30,11 +30,39 @@ interface HealthData {
   osd_count?: number
 }
 
-function StatusBadge({ status, building }: { status: string; building: boolean }) {
+const STAGE_COLORS: Record<string, string> = {
+  locker_queue:  'text-accent-amber',
+  init:          'text-text-muted',
+  prepare_jslave:'text-text-muted',
+  install_ocp:   'text-accent-cyan',
+  install_ocs:   'text-accent-cyan',
+  rhcs:          'text-accent-cyan',
+  upgrade:       'text-accent-green',
+  test:          'text-accent-green',
+  teardown:      'text-text-muted',
+}
+
+function ageStr(iso: string): string {
+  const ms = Date.now() - new Date(iso + (iso.includes('Z') ? '' : 'Z')).getTime()
+  const m = Math.floor(ms / 60_000)
+  const h = Math.floor(m / 60)
+  return h > 0 ? `${h}h ${m % 60}m` : `${m}m`
+}
+
+function StatusBadge({ status, building, stage, queueSince }: {
+  status: string; building: boolean; stage?: string | null; queueSince?: string | null
+}) {
   if (building) return (
-    <span className="flex items-center gap-1.5 text-xs font-mono text-accent-cyan">
-      <span className="w-2 h-2 rounded-full bg-accent-cyan animate-pulse" />BUILDING
-    </span>
+    <div className="flex flex-col items-end gap-0.5">
+      <span className="flex items-center gap-1.5 text-xs font-mono text-accent-cyan">
+        <span className="w-2 h-2 rounded-full bg-accent-cyan animate-pulse" />BUILDING
+      </span>
+      {stage && (
+        <span className={`text-[10px] font-mono ${STAGE_COLORS[stage] ?? 'text-text-muted'}`}>
+          {stage}{stage === 'locker_queue' && queueSince ? ` · ${ageStr(queueSince)}` : ''}
+        </span>
+      )}
+    </div>
   )
   const map: Record<string, { dot: string; text: string }> = {
     HEALTHY:     { dot: 'bg-accent-green',               text: 'text-accent-green' },
@@ -75,6 +103,15 @@ function PwField({ password }: { password?: string }) {
 }
 
 export default function ClusterCard({ cluster, isOwner = true }: { cluster: ClusterInfo; isOwner?: boolean }) {
+  const { data: stageData } = useQuery<{ stage: string | null; queue_since?: string }>({
+    queryKey: ['stage', cluster.cluster_name],
+    queryFn: () => api.get(`/clusters/${cluster.cluster_name}/stage`),
+    enabled: cluster.building,
+    staleTime: 25_000,
+    refetchInterval: 30_000,
+    retry: false,
+  })
+
   const { data: health, isLoading: healthLoading } = useQuery<HealthData>({
     queryKey: ['health', cluster.cluster_name],
     queryFn: () => api.get(`/clusters/${cluster.cluster_name}/health`),
@@ -144,7 +181,12 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
             {age && <span> · {age}</span>}
           </p>
         </div>
-        <StatusBadge status={status} building={cluster.building} />
+        <StatusBadge
+          status={status}
+          building={cluster.building}
+          stage={stageData?.stage}
+          queueSince={stageData?.queue_since}
+        />
       </div>
 
       {platform && <p className="text-xs font-mono text-text-secondary truncate">{platform}</p>}

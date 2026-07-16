@@ -58,18 +58,37 @@ function jenkinsStatus(c: ClusterEntry): string {
   if (c.building) return 'Building'
   if (c.result === 'FAILURE') return 'Failed'
   if (c.result === 'ABORTED') return 'Aborted'
-  return 'Active'   // result=SUCCESS or still in progress — real status from health query
+  return 'Active'
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  Building:    'text-accent-cyan',
-  HEALTHY:     'text-accent-green',
-  DEGRADED:    'text-accent-amber',
-  UNREACHABLE: 'text-text-muted',
-  Failed:      'text-accent-red',
-  Aborted:     'text-text-muted',
-  LOADING:     'text-text-muted',
-  Active:      'text-text-muted',
+  Building:      'text-accent-cyan',
+  HEALTHY:       'text-accent-green',
+  DEGRADED:      'text-accent-amber',
+  UNREACHABLE:   'text-text-muted',
+  Failed:        'text-accent-red',
+  Aborted:       'text-text-muted',
+  LOADING:       'text-text-muted',
+  Active:        'text-text-muted',
+}
+
+const STAGE_COLORS: Record<string, string> = {
+  locker_queue:   'text-accent-amber',
+  init:           'text-text-muted',
+  prepare_jslave: 'text-text-muted',
+  install_ocp:    'text-accent-cyan',
+  install_ocs:    'text-accent-cyan',
+  rhcs:           'text-accent-cyan',
+  upgrade:        'text-accent-green',
+  test:           'text-accent-green',
+  teardown:       'text-text-muted',
+}
+
+function ageStr(iso: string): string {
+  const ms = Date.now() - new Date(iso + (iso.includes('Z') ? '' : 'Z')).getTime()
+  const m = Math.floor(ms / 60_000)
+  const h = Math.floor(m / 60)
+  return h > 0 ? `${h}h ${m % 60}m` : `${m}m`
 }
 
 function age(ts: number | null): string {
@@ -117,6 +136,15 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
   const platform = detectPlatform(c.credentials_conf, c.platform_conf)
   const isMe = c.owner === me
 
+  const { data: stageData } = useQuery<{ stage: string | null; queue_since?: string }>({
+    queryKey: ['stage', c.cluster_name],
+    queryFn: () => api.get(`/clusters/${c.cluster_name}/stage`),
+    enabled: c.building,
+    staleTime: 25_000,
+    refetchInterval: 30_000,
+    retry: false,
+  })
+
   const { data: health } = useQuery({
     queryKey: ['health', c.cluster_name],
     queryFn: () => api.get<{ status: string }>(`/clusters/${c.cluster_name}/health`),
@@ -150,10 +178,19 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
             {c.cluster_name}
           </span>
           {!isMe && <span className="text-[9px] font-mono text-text-muted shrink-0 w-16 truncate">{c.owner}</span>}
-          <span className={`text-[10px] font-mono shrink-0 w-20 ${STATUS_COLORS[status]}`}>
-            {c.building && <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent-cyan animate-pulse mr-1" />}
-            {status}
-          </span>
+          <div className="flex flex-col shrink-0 w-28">
+            <span className={`text-[10px] font-mono ${STATUS_COLORS[status]}`}>
+              {c.building && <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent-cyan animate-pulse mr-1" />}
+              {status}
+            </span>
+            {c.building && stageData?.stage && (
+              <span className={`text-[9px] font-mono ${STAGE_COLORS[stageData.stage] ?? 'text-text-muted'}`}>
+                {stageData.stage}
+                {stageData.stage === 'locker_queue' && stageData.queue_since
+                  ? ` · ${ageStr(stageData.queue_since)}` : ''}
+              </span>
+            )}
+          </div>
           <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border shrink-0 ${PLATFORM_COLORS[platform] ?? PLATFORM_COLORS.other}`}>
             {PLATFORM_LABELS[platform] ?? platform}
           </span>
@@ -249,7 +286,7 @@ function Group({ label, count, children }: { label: string; count: number; child
 // ── sort / group helpers ──────────────────────────────────────────────────────
 
 type SortKey = 'age' | 'owner' | 'platform' | 'ocp' | 'ocs' | 'status'
-type GroupKey = 'none' | 'owner' | 'platform' | 'status' | 'ocp' | 'ocs'
+type GroupKey = 'none' | 'owner' | 'platform' | 'status' | 'stage' | 'ocp' | 'ocs'
 
 function sortClusters(list: ClusterEntry[], by: SortKey): ClusterEntry[] {
   return [...list].sort((a, b) => {
@@ -266,23 +303,41 @@ function sortClusters(list: ClusterEntry[], by: SortKey): ClusterEntry[] {
   })
 }
 
-function groupClusters(list: ClusterEntry[], by: GroupKey): [string, ClusterEntry[]][] {
+function groupClusters(
+  list: ClusterEntry[], by: GroupKey,
+  qc?: ReturnType<typeof useQueryClient>
+): [string, ClusterEntry[]][] {
   if (by === 'none') return [['All', list]]
   const map = new Map<string, ClusterEntry[]>()
   for (const c of list) {
-    const key = by === 'owner'    ? c.owner
-              : by === 'platform' ? (PLATFORM_LABELS[detectPlatform(c.credentials_conf, c.platform_conf)] ?? 'Other')
-              : by === 'status'   ? jenkinsStatus(c)
-              : by === 'ocp'      ? (c.ocp_version || 'Unknown')
-              : by === 'ocs'      ? (c.ocs_version || 'Unknown')
-              : 'All'
+    let key: string
+    if (by === 'stage' && c.building) {
+      const stage = qc ? getStageFromCache(qc, c.cluster_name) : null
+      key = stage ? `Building · ${stage}` : 'Building'
+    } else {
+      key = by === 'owner'    ? c.owner
+          : by === 'platform' ? (PLATFORM_LABELS[detectPlatform(c.credentials_conf, c.platform_conf)] ?? 'Other')
+          : by === 'status' || by === 'stage' ? jenkinsStatus(c)
+          : by === 'ocp'      ? (c.ocp_version || 'Unknown')
+          : by === 'ocs'      ? (c.ocs_version || 'Unknown')
+          : 'All'
+    }
     if (!map.has(key)) map.set(key, [])
     map.get(key)!.push(c)
   }
-  return [...map.entries()].sort((a, b) => b[1].length - a[1].length)
+  return [...map.entries()].sort((a, b) => {
+    const aB = a[0].startsWith('Building'), bB = b[0].startsWith('Building')
+    if (aB !== bB) return aB ? -1 : 1
+    return b[1].length - a[1].length
+  })
 }
 
 // ── main page ─────────────────────────────────────────────────────────────────
+
+function getStageFromCache(queryClient: ReturnType<typeof useQueryClient>, clusterName: string): string | null {
+  const d = queryClient.getQueryData<{ stage: string | null }>(['stage', clusterName])
+  return d?.stage ?? null
+}
 
 export default function AllClusters({ username }: { username: string }) {
   const { data: clusters = [], isLoading } = useQuery<ClusterEntry[]>({
@@ -335,7 +390,8 @@ export default function AllClusters({ username }: { username: string }) {
   }, [clusters, search, platformFilter, statusFilter, ownerFilter])
 
   const sorted = useMemo(() => sortClusters(filtered, sortBy), [filtered, sortBy])
-  const grouped = useMemo(() => groupClusters(sorted, groupBy === 'none' ? 'none' : groupBy), [sorted, groupBy])
+  const queryClient = useQueryClient()
+  const grouped = useMemo(() => groupClusters(sorted, groupBy, queryClient), [sorted, groupBy, queryClient])
 
   const SelectBtn = ({ value, current, set, label }: { value: string; current: string; set: (v: any) => void; label: string }) => (
     <button onClick={() => set(value)}
@@ -396,9 +452,9 @@ export default function AllClusters({ username }: { username: string }) {
           </div>
           <div className="flex items-center gap-1.5 flex-wrap">
             <span className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Group</span>
-            {(['none','owner','platform','status','ocp','ocs'] as GroupKey[]).map(g => (
+            {(['none','owner','platform','status','stage','ocp','ocs'] as GroupKey[]).map(g => (
               <SelectBtn key={g} value={g} current={groupBy} set={setGroupBy}
-                label={g === 'none' ? 'None' : g === 'ocp' ? 'OCP' : g === 'ocs' ? 'OCS' : g.charAt(0).toUpperCase() + g.slice(1)} />
+                label={g === 'none' ? 'None' : g === 'ocp' ? 'OCP' : g === 'ocs' ? 'OCS' : g === 'stage' ? 'Stage' : g.charAt(0).toUpperCase() + g.slice(1)} />
             ))}
           </div>
         </div>

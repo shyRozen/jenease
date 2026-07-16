@@ -1,7 +1,10 @@
 import asyncio
+import html as _html_mod
 import re
+from datetime import datetime
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -12,8 +15,58 @@ from config import settings
 
 router = APIRouter(prefix="/api/clusters", tags=["clusters"])
 
-DEPLOY_JOB = "qe-deploy-ocs-cluster"
+DEPLOY_JOB  = "qe-deploy-ocs-cluster"
 DESTROY_JOB = "qe-destroy-ocs-cluster"
+
+LOCKER_URL = "https://odf-resourcelocker.apps.int.spoke.prod.us-east-1.aws.paas.redhat.com/pendingrequests/"
+
+STAGE_SHORT: dict[str, str] = {
+    "Initialization":                   "init",
+    "Prepare Temporary Jenkins Slave":  "prepare_jslave",
+    "Install_OCP":                      "install_ocp",
+    "Install_OCS":                      "install_ocs",
+    "External RHCS":                    "rhcs",
+    "Upgrade":                          "upgrade",
+    "Test":                             "test",
+    "Declarative: Post Actions":        "teardown",
+}
+
+
+async def _fetch_locker_queue() -> dict[str, Optional[str]]:
+    """Scrape the locker pending requests page.
+    Returns {build_url_stripped: iso_queue_since_or_None}."""
+    try:
+        async with httpx.AsyncClient(timeout=8, verify=False) as c:
+            r = await c.get(LOCKER_URL)
+        if not r.is_success:
+            return {}
+    except Exception:
+        return {}
+
+    queue: dict[str, Optional[str]] = {}
+    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', r.text, re.DOTALL)
+    for row in rows[1:]:
+        text = re.sub(r'<[^>]+>', ' ', row).strip()
+        text = ' '.join(text.split())
+        text = _html_mod.unescape(text)
+
+        link_m = re.search(r"'link':\s*'([^']+)'", text)
+        if not link_m:
+            continue
+        link = link_m.group(1).rstrip('/')
+
+        # Parse "July 16, 2026, 5:41 a.m." → ISO string
+        queue_since: Optional[str] = None
+        time_m = re.search(r'(\w+ \d+, \d{4}, \d+:\d+ [ap]\.m\.)', text)
+        if time_m:
+            try:
+                ts = time_m.group(1).replace('a.m.', 'AM').replace('p.m.', 'PM')
+                queue_since = datetime.strptime(ts, "%B %d, %Y, %I:%M %p").isoformat()
+            except Exception:
+                pass
+
+        queue[link] = queue_since
+    return queue
 
 
 def _make_client(session: dict) -> JenkinsClient:
@@ -300,6 +353,72 @@ async def cluster_health(cluster_name: str, session: dict = Depends(get_session)
         "odf_full_version": health.get("odf_full_version"),
         "osd_iops": health.get("osd_iops"),
     }
+
+
+@router.get("/{cluster_name}/stage")
+async def cluster_stage(cluster_name: str, session: dict = Depends(get_session)):
+    """Current Jenkins pipeline stage for a building cluster.
+    Checks locker queue if in Initialization."""
+    jenkins = _make_client(session)
+
+    # Find the building build for this cluster
+    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+    build_num: Optional[int] = None
+    build_url: Optional[str] = None
+    for b in builds:
+        name = _cluster_name_from_desc(b.get("description", "") or "") or b.get("_param_cluster_name")
+        if name == cluster_name and b.get("building"):
+            build_num = b["number"]
+            build_url = f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{build_num}"
+            break
+
+    if not build_num:
+        return {"stage": None}
+
+    # Query wfapi/describe for stage info
+    try:
+        async with httpx.AsyncClient(timeout=10, verify=False) as c:
+            r = await c.get(
+                f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{build_num}/wfapi/describe",
+                auth=(session["username"], session["token"]),
+            )
+            wf = r.json()
+    except Exception:
+        return {"stage": None}
+
+    # Find the currently in-progress stage
+    current: Optional[str] = None
+    for s in wf.get("stages", []):
+        if s.get("status") == "IN_PROGRESS":
+            current = s["name"]
+            break
+    # Fall back to last SUCCESS stage if nothing in progress yet
+    if not current:
+        for s in reversed(wf.get("stages", [])):
+            if s.get("status") == "SUCCESS":
+                current = s["name"]
+                break
+
+    if not current:
+        return {"stage": None}
+
+    short = STAGE_SHORT.get(current, current.lower().replace(" ", "_"))
+
+    # If in Initialization check if blocked on locker queue
+    queue_since: Optional[str] = None
+    if current == "Initialization" and build_url:
+        locker = await _fetch_locker_queue()
+        build_clean = build_url.rstrip('/')
+        for url, ts in locker.items():
+            if url.rstrip('/') == build_clean:
+                short = "locker_queue"
+                queue_since = ts
+                break
+
+    result: dict = {"stage": short}
+    if queue_since:
+        result["queue_since"] = queue_since
+    return result
 
 
 @router.get("/{cluster_name}/kubeconfig")

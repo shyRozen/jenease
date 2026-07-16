@@ -117,13 +117,12 @@ endpoint  = os.environ["S3_ENDPOINT"]
 key_id    = os.environ["ACCESS_KEY"]
 secret    = os.environ["SECRET_KEY"]
 bucket    = os.environ["BUCKET_NAME"]
-size_gb   = int(os.environ.get("SIZE_GB", "1"))
-mode      = os.environ.get("MODE", "write")
-
-WORKERS    = 8
-OBJ_SIZE   = 64 * 1024 * 1024   # 64 MB per object
-total_objs = max(1, size_gb * 1024 * 1024 * 1024 // OBJ_SIZE)
-chunk      = b"x" * OBJ_SIZE
+size_gb      = int(os.environ.get("SIZE_GB", "1"))
+mode         = os.environ.get("MODE", "write")
+WORKERS      = int(os.environ.get("WORKERS", "8"))
+OBJ_SIZE     = int(os.environ.get("OBJ_SIZE_MB", "64")) * 1024 * 1024
+total_objs   = max(1, size_gb * 1024 * 1024 * 1024 // OBJ_SIZE)
+chunk        = b"x" * OBJ_SIZE
 
 def make_s3():
     return boto3.client("s3", endpoint_url=endpoint,
@@ -217,6 +216,10 @@ def _sync_create_io_workload(
     size_gb: int,
     mode: str,
     pattern: str,
+    block_size: str = "1m",
+    num_jobs: int = 4,
+    iodepth: int = 32,
+    duration_sec: int = 0,
 ):
     from kubernetes import client
 
@@ -268,12 +271,10 @@ def _sync_create_io_workload(
         ),
     )
 
-    fio_rw  = FIO_RW.get((mode, pattern), "write")
-    bs      = BLOCK_SIZE.get(pattern, "1m")
-    iodepth = IODEPTH.get(pattern, 16)
+    fio_rw     = FIO_RW.get((mode, pattern), "write")
+    per_job_gb = max(1, size_gb // num_jobs)
 
-    # Only pre-fill for pure read — write/readwrite let fio create the file itself.
-    # Show dd progress so the log terminal isn't blank during pre-fill.
+    duration_desc = f"{duration_sec}s" if duration_sec > 0 else f"{per_job_gb}GB"
     prefill = ""
     if mode == "read":
         mb = size_gb * 1024
@@ -283,13 +284,13 @@ def _sync_create_io_workload(
             f"grep -v '^$' | while IFS= read -r l; do echo \"[PREFILL] $l\"; done && "
         )
 
-    per_job_gb = max(1, size_gb // NUMJOBS)
+    time_flags = f"--time_based --runtime={duration_sec}" if duration_sec > 0 else ""
     cmd = (
-        f"echo '[jenease] Starting fio ({fio_rw}, bs={bs}, {NUMJOBS} jobs × {per_job_gb}GB, iodepth={iodepth})...' && "
+        f"echo '[jenease] Starting fio ({fio_rw}, bs={block_size}, {num_jobs} jobs × {duration_desc}, iodepth={iodepth})...' && "
         f"{prefill}"
         f"fio --name=jenease --ioengine=libaio --direct=1 "
-        f"--bs={bs} --numjobs={NUMJOBS} --iodepth={iodepth} --rw={fio_rw} "
-        f"--size={per_job_gb}g "
+        f"--bs={block_size} --numjobs={num_jobs} --iodepth={iodepth} --rw={fio_rw} "
+        f"--size={per_job_gb}g {time_flags} "
         f"--filename=/data/testfile --fallocate=none "
         f"--status-interval=2 --group_reporting 2>&1 && "
         f"echo '[jenease] Workload complete.'"
@@ -309,8 +310,6 @@ def _sync_create_io_workload(
                         command=["/bin/bash", "-c", cmd],
                         env=[
                             client.V1EnvVar(name="SIZE_GB", value=str(size_gb)),
-                            client.V1EnvVar(name="MODE",    value=mode),
-                            client.V1EnvVar(name="PATTERN", value=pattern),
                         ],
                         security_context=client.V1SecurityContext(
                             run_as_user=0,
@@ -342,6 +341,8 @@ def _sync_create_noobaa_workload(
     pod_name: str,
     size_gb: int,
     mode: str,
+    obj_size_mb: int = 64,
+    workers: int = 8,
 ):
     from kubernetes import client
 
@@ -423,6 +424,8 @@ def _sync_create_noobaa_workload(
                             client.V1EnvVar(name="BUCKET_NAME",  value=bucket_name),
                             client.V1EnvVar(name="SIZE_GB",      value=str(size_gb)),
                             client.V1EnvVar(name="MODE",         value=mode),
+                            client.V1EnvVar(name="OBJ_SIZE_MB",  value=str(obj_size_mb)),
+                            client.V1EnvVar(name="WORKERS",      value=str(workers)),
                         ],
                     )
                 ],
@@ -441,19 +444,27 @@ async def create_workload(
     size_gb: int,
     mode: str,
     pattern: str,
+    block_size: str = "1m",
+    num_jobs: int = 4,
+    iodepth: int = 32,
+    duration_sec: int = 0,
+    obj_size_mb: int = 64,
+    workers: int = 8,
 ):
     loop = asyncio.get_event_loop()
     if workload_type == "noobaa":
         await asyncio.wait_for(
             loop.run_in_executor(None, _sync_create_noobaa_workload,
-                kubeconfig_url, namespace, pvc_name, pod_name, size_gb, mode),
+                kubeconfig_url, namespace, pvc_name, pod_name,
+                size_gb, mode, obj_size_mb, workers),
             timeout=180.0,
         )
     else:
         await asyncio.wait_for(
             loop.run_in_executor(None, _sync_create_io_workload,
                 kubeconfig_url, namespace, pvc_name, pod_name,
-                workload_type, size_gb, mode, pattern),
+                workload_type, size_gb, mode, pattern,
+                block_size, num_jobs, iodepth, duration_sec),
             timeout=60.0,
         )
 

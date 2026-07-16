@@ -50,10 +50,18 @@ async def _get_kubeconfig_url(jenkins: JenkinsClient, cluster_name: str) -> Opti
 # ── request/response models ───────────────────────────────────────────────────
 
 class CreateWorkloadRequest(BaseModel):
-    workload_type: str   # rbd | cephfs | noobaa
-    size_gb: int         # 1 | 10 | 50 | 100
-    mode: str            # read | write | readwrite
-    pattern: str = "sequential"  # sequential | random (ignored for noobaa)
+    workload_type: str          # rbd | cephfs | noobaa
+    size_gb: int                # 1 | 10 | 50 | 100
+    mode: str                   # read | write | readwrite
+    pattern: str = "sequential" # sequential | random (ignored for noobaa)
+    # RBD / CephFS fio options
+    block_size: str = "1m"      # 4k | 64k | 512k | 1m | 4m
+    num_jobs: int = 4           # 1 | 2 | 4 | 8
+    iodepth: int = 32           # 1 | 8 | 32 | 64 | 128
+    duration_sec: int = 0       # 0 = size-based; else time_based run
+    # NooBaa options
+    obj_size_mb: int = 64       # 1 | 16 | 64 | 256
+    workers: int = 8            # 1 | 4 | 8 | 16 | 32
 
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
@@ -89,6 +97,12 @@ async def create(
             size_gb=body.size_gb,
             mode=body.mode,
             pattern=body.pattern,
+            block_size=body.block_size,
+            num_jobs=body.num_jobs,
+            iodepth=body.iodepth,
+            duration_sec=body.duration_sec,
+            obj_size_mb=body.obj_size_mb,
+            workers=body.workers,
         )
     except Exception as e:
         raise HTTPException(502, f"Failed to create workload: {e}")

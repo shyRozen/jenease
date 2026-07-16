@@ -219,10 +219,18 @@ export default function WorkloadPanel({
   const queryClient = useQueryClient()
 
   // Form state
-  const [type,    setType]    = useState<'rbd' | 'cephfs' | 'noobaa'>('rbd')
-  const [size,    setSize]    = useState(10)
-  const [mode,    setMode]    = useState<'write' | 'read' | 'readwrite'>('write')
-  const [pattern, setPattern] = useState<'sequential' | 'random'>('sequential')
+  const [type,       setType]       = useState<'rbd' | 'cephfs' | 'noobaa'>('rbd')
+  const [size,       setSize]       = useState(10)
+  const [mode,       setMode]       = useState<'write' | 'read' | 'readwrite'>('write')
+  const [pattern,    setPattern]    = useState<'sequential' | 'random'>('sequential')
+  // RBD / CephFS fio options
+  const [blockSize,  setBlockSize]  = useState('1m')
+  const [numJobs,    setNumJobs]    = useState(4)
+  const [iodepth,    setIodepth]    = useState(32)
+  const [duration,   setDuration]   = useState(0)   // 0 = size-based
+  // NooBaa options
+  const [objSizeMb,  setObjSizeMb]  = useState(64)
+  const [workers,    setWorkers]    = useState(8)
   const [launching, setLaunching] = useState(false)
   const [launchError, setLaunchError] = useState('')
 
@@ -285,6 +293,12 @@ export default function WorkloadPanel({
         size_gb: size,
         mode,
         pattern,
+        block_size: blockSize,
+        num_jobs: numJobs,
+        iodepth,
+        duration_sec: duration,
+        obj_size_mb: objSizeMb,
+        workers,
       })
       await refetch()
     } catch (e: any) {
@@ -325,9 +339,11 @@ export default function WorkloadPanel({
           </div>
         </div>
 
-        {/* Size */}
+        {/* Size — PVC / total data */}
         <div className="space-y-1">
-          <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Size</p>
+          <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">
+            {type === 'noobaa' ? 'Total Data' : 'PVC Size'}
+          </p>
           <div className="flex gap-1.5 flex-wrap">
             {[1, 10, 50, 100].map(s => (
               <Btn key={s} active={size === s} onClick={() => setSize(s)}>{s}GB</Btn>
@@ -345,8 +361,8 @@ export default function WorkloadPanel({
           </div>
         </div>
 
-        {/* Pattern — only for RBD/CephFS */}
-        {type !== 'noobaa' && (
+        {/* ── RBD / CephFS options ── */}
+        {type !== 'noobaa' && (<>
           <div className="space-y-1">
             <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Pattern</p>
             <div className="flex gap-1.5">
@@ -354,7 +370,65 @@ export default function WorkloadPanel({
               <Btn active={pattern === 'random'}     onClick={() => setPattern('random')}>Random</Btn>
             </div>
           </div>
-        )}
+
+          <div className="space-y-1">
+            <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Block Size</p>
+            <div className="flex gap-1.5 flex-wrap">
+              {['4k', '64k', '512k', '1m', '4m'].map(bs => (
+                <Btn key={bs} active={blockSize === bs} onClick={() => setBlockSize(bs)}>{bs}</Btn>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">numjobs</p>
+            <div className="flex gap-1.5 flex-wrap">
+              {[1, 2, 4, 8].map(n => (
+                <Btn key={n} active={numJobs === n} onClick={() => setNumJobs(n)}>{n}</Btn>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">iodepth</p>
+            <div className="flex gap-1.5 flex-wrap">
+              {[1, 8, 32, 64, 128].map(d => (
+                <Btn key={d} active={iodepth === d} onClick={() => setIodepth(d)}>{d}</Btn>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Duration</p>
+            <div className="flex gap-1.5 flex-wrap">
+              <Btn active={duration === 0}    onClick={() => setDuration(0)}>Size</Btn>
+              <Btn active={duration === 30}   onClick={() => setDuration(30)}>30s</Btn>
+              <Btn active={duration === 60}   onClick={() => setDuration(60)}>1m</Btn>
+              <Btn active={duration === 300}  onClick={() => setDuration(300)}>5m</Btn>
+            </div>
+          </div>
+        </>)}
+
+        {/* ── NooBaa options ── */}
+        {type === 'noobaa' && (<>
+          <div className="space-y-1">
+            <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Object Size</p>
+            <div className="flex gap-1.5 flex-wrap">
+              {[1, 16, 64, 256].map(mb => (
+                <Btn key={mb} active={objSizeMb === mb} onClick={() => setObjSizeMb(mb)}>{mb}MB</Btn>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Workers</p>
+            <div className="flex gap-1.5 flex-wrap">
+              {[1, 4, 8, 16, 32].map(w => (
+                <Btn key={w} active={workers === w} onClick={() => setWorkers(w)}>{w}</Btn>
+              ))}
+            </div>
+          </div>
+        </>)}
 
         {launchError && (
           <p className="text-[10px] font-mono text-accent-red">{launchError}</p>

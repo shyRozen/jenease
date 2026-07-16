@@ -315,7 +315,7 @@ export default function WorkloadPanel({
         className={`text-[10px] font-mono px-2 py-0.5 rounded border transition-colors ${
           active
             ? 'border-accent-cyan text-accent-cyan bg-accent-cyan/10'
-            : 'border-surface-4 text-text-muted hover:border-surface-4 hover:text-text-secondary'
+            : 'border-surface-4 text-text-primary hover:border-accent-cyan/40 hover:text-accent-cyan'
         }`}
       >
         {children}

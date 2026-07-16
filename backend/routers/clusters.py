@@ -358,10 +358,10 @@ async def cluster_health(cluster_name: str, session: dict = Depends(get_session)
     if not target:
         return {"status": "NOT_FOUND"}
 
-    if target.get("building"):
-        return {"status": "BUILDING"}
-
     parsed = JenkinsClient.parse_build_description(target.get("description", "") or "")
+
+    if target.get("building") and not parsed.get("kubeconfig_url"):
+        return {"status": "BUILDING"}
 
     health = await fetch_cluster_health(
         console_url=parsed.get("console_url"),
@@ -602,10 +602,13 @@ async def cluster_details(cluster_name: str, session: dict = Depends(get_session
             target = b
             break
 
-    if not target or target.get("building"):
-        return {"error": "Not available while building"}
+    if not target:
+        return {"error": "Not found"}
 
     parsed = JenkinsClient.parse_build_description(target.get("description", "") or "")
+
+    if target.get("building") and not parsed.get("kubeconfig_url"):
+        return {"error": "Not available while building"}
 
     details = await fetch_cluster_details(
         console_url=parsed.get("console_url"),

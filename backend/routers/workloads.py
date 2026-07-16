@@ -63,6 +63,8 @@ class CreateWorkloadRequest(BaseModel):
     # NooBaa options
     obj_size_mb: int = 64       # 1 | 16 | 64 | 256
     workers: int = 8            # 1 | 4 | 8 | 16 | 32
+    # fio IO engine (rbd/cephfs only)
+    engine: str = "psync"       # psync | posixaio | io_uring | libaio
     # Recording
     session_id: Optional[int] = None
 
@@ -106,6 +108,7 @@ async def create(
             duration_sec=body.duration_sec,
             obj_size_mb=body.obj_size_mb,
             workers=body.workers,
+            engine=body.engine,
         )
     except Exception as e:
         raise HTTPException(502, f"Failed to create workload: {e}")

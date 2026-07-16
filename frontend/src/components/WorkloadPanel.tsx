@@ -235,6 +235,7 @@ export default function WorkloadPanel({
   const [numJobs,    setNumJobs]    = useState(4)
   const [iodepth,    setIodepth]    = useState(32)
   const [duration,   setDuration]   = useState(0)   // 0 = size-based
+  const [engine,     setEngine]     = useState('psync')
   // NooBaa options
   const [objSizeMb,  setObjSizeMb]  = useState(64)
   const [workers,    setWorkers]    = useState(8)
@@ -342,6 +343,7 @@ export default function WorkloadPanel({
         duration_sec: duration,
         obj_size_mb: objSizeMb,
         workers,
+        engine,
         session_id: recordingId,
       })
       await refetch()
@@ -538,6 +540,16 @@ export default function WorkloadPanel({
               <Btn active={duration === 30}   onClick={() => setDuration(30)}>30s</Btn>
               <Btn active={duration === 60}   onClick={() => setDuration(60)}>1m</Btn>
               <Btn active={duration === 300}  onClick={() => setDuration(300)}>5m</Btn>
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">IO Engine</p>
+            <div className="flex gap-1.5 flex-wrap">
+              <Btn active={engine === 'psync'}    onClick={() => setEngine('psync')}>psync</Btn>
+              <Btn active={engine === 'posixaio'} onClick={() => setEngine('posixaio')}>posixaio</Btn>
+              <Btn active={engine === 'io_uring'} onClick={() => setEngine('io_uring')}>io_uring</Btn>
+              <Btn active={engine === 'libaio'}   onClick={() => setEngine('libaio')}>libaio</Btn>
             </div>
           </div>
         </>)}

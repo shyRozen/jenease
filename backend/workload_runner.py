@@ -220,6 +220,7 @@ def _sync_create_io_workload(
     num_jobs: int = 4,
     iodepth: int = 32,
     duration_sec: int = 0,
+    engine: str = "psync",
 ):
     from kubernetes import client
 
@@ -285,13 +286,16 @@ def _sync_create_io_workload(
         )
 
     time_flags = f"--time_based --runtime={duration_sec}" if duration_sec > 0 else ""
-    # RBD (block device): --direct=1 bypasses page cache for real measurements
-    # CephFS: O_DIRECT not supported, skip direct flag (buffered IO)
-    io_flags = "--direct=1" if workload_type == "rbd" else ""
+    # libaio requires --direct=1 to function properly
+    # For other engines: --direct=1 on RBD (block device), not on CephFS (O_DIRECT unsupported)
+    if engine == "libaio":
+        direct_flag = "--direct=1"
+    else:
+        direct_flag = "--direct=1" if workload_type == "rbd" else ""
     cmd = (
-        f"echo '[jenease] Starting fio ({fio_rw}, bs={block_size}, {num_jobs} jobs × {duration_desc}, iodepth={iodepth})...' && "
+        f"echo '[jenease] Starting fio ({fio_rw}, bs={block_size}, {num_jobs} jobs × {duration_desc}, iodepth={iodepth}, engine={engine})...' && "
         f"{prefill}"
-        f"fio --name=jenease {io_flags} "
+        f"fio --name=jenease --ioengine={engine} {direct_flag} "
         f"--bs={block_size} --numjobs={num_jobs} --iodepth={iodepth} --rw={fio_rw} "
         f"--size={per_job_gb}g {time_flags} "
         f"--filename=/data/testfile --fallocate=none "
@@ -453,6 +457,7 @@ async def create_workload(
     duration_sec: int = 0,
     obj_size_mb: int = 64,
     workers: int = 8,
+    engine: str = "psync",
 ):
     loop = asyncio.get_event_loop()
     if workload_type == "noobaa":
@@ -467,7 +472,7 @@ async def create_workload(
             loop.run_in_executor(None, _sync_create_io_workload,
                 kubeconfig_url, namespace, pvc_name, pod_name,
                 workload_type, size_gb, mode, pattern,
-                block_size, num_jobs, iodepth, duration_sec),
+                block_size, num_jobs, iodepth, duration_sec, engine),
             timeout=60.0,
         )
 

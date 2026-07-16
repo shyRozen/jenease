@@ -64,7 +64,7 @@ class CreateWorkloadRequest(BaseModel):
     obj_size_mb: int = 64       # 1 | 16 | 64 | 256
     workers: int = 8            # 1 | 4 | 8 | 16 | 32
     # fio IO engine (rbd/cephfs only)
-    engine: str = "psync"       # psync | posixaio | io_uring | libaio
+    engine: str = "libaio"      # psync | posixaio | io_uring | libaio
     # Recording
     session_id: Optional[int] = None
 

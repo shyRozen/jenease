@@ -235,7 +235,7 @@ export default function WorkloadPanel({
   const [numJobs,    setNumJobs]    = useState(4)
   const [iodepth,    setIodepth]    = useState(32)
   const [duration,   setDuration]   = useState(0)   // 0 = size-based
-  const [engine,     setEngine]     = useState('psync')
+  const [engine,     setEngine]     = useState('libaio')
   // NooBaa options
   const [objSizeMb,  setObjSizeMb]  = useState(64)
   const [workers,    setWorkers]    = useState(8)

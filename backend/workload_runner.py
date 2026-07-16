@@ -220,7 +220,7 @@ def _sync_create_io_workload(
     num_jobs: int = 4,
     iodepth: int = 32,
     duration_sec: int = 0,
-    engine: str = "psync",
+    engine: str = "libaio",
 ):
     from kubernetes import client
 
@@ -457,7 +457,7 @@ async def create_workload(
     duration_sec: int = 0,
     obj_size_mb: int = 64,
     workers: int = 8,
-    engine: str = "psync",
+    engine: str = "libaio",
 ):
     loop = asyncio.get_event_loop()
     if workload_type == "noobaa":

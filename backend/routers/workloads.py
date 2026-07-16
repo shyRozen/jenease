@@ -65,6 +65,7 @@ class CreateWorkloadRequest(BaseModel):
     workers: int = 8            # 1 | 4 | 8 | 16 | 32
     # fio IO engine (rbd/cephfs only)
     engine: str = "libaio"      # psync | posixaio | io_uring | libaio
+    direct: bool = True         # --direct=1 (bypass page cache)
     # Recording
     session_id: Optional[int] = None
 
@@ -109,6 +110,7 @@ async def create(
             obj_size_mb=body.obj_size_mb,
             workers=body.workers,
             engine=body.engine,
+            direct=body.direct,
         )
     except Exception as e:
         raise HTTPException(502, f"Failed to create workload: {e}")

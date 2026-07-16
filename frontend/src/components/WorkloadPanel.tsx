@@ -236,6 +236,7 @@ export default function WorkloadPanel({
   const [iodepth,    setIodepth]    = useState(32)
   const [duration,   setDuration]   = useState(0)   // 0 = size-based
   const [engine,     setEngine]     = useState('libaio')
+  const [direct,     setDirect]     = useState(true)
   // NooBaa options
   const [objSizeMb,  setObjSizeMb]  = useState(64)
   const [workers,    setWorkers]    = useState(8)
@@ -344,6 +345,7 @@ export default function WorkloadPanel({
         obj_size_mb: objSizeMb,
         workers,
         engine,
+        direct,
         session_id: recordingId,
       })
       await refetch()
@@ -550,6 +552,14 @@ export default function WorkloadPanel({
               <Btn active={engine === 'posixaio'} onClick={() => setEngine('posixaio')}>posixaio</Btn>
               <Btn active={engine === 'io_uring'} onClick={() => setEngine('io_uring')}>io_uring</Btn>
               <Btn active={engine === 'libaio'}   onClick={() => setEngine('libaio')}>libaio</Btn>
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Direct IO</p>
+            <div className="flex gap-1.5">
+              <Btn active={direct}  onClick={() => setDirect(true)}>On</Btn>
+              <Btn active={!direct} onClick={() => setDirect(false)}>Off</Btn>
             </div>
           </div>
         </>)}

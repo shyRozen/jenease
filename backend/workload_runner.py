@@ -221,6 +221,7 @@ def _sync_create_io_workload(
     iodepth: int = 32,
     duration_sec: int = 0,
     engine: str = "libaio",
+    direct: bool = True,
 ):
     from kubernetes import client
 
@@ -286,12 +287,7 @@ def _sync_create_io_workload(
         )
 
     time_flags = f"--time_based --runtime={duration_sec}" if duration_sec > 0 else ""
-    # libaio requires --direct=1 to function properly
-    # For other engines: --direct=1 on RBD (block device), not on CephFS (O_DIRECT unsupported)
-    if engine == "libaio":
-        direct_flag = "--direct=1"
-    else:
-        direct_flag = "--direct=1" if workload_type == "rbd" else ""
+    direct_flag = "--direct=1" if direct else ""
     cmd = (
         f"echo '[jenease] Starting fio ({fio_rw}, bs={block_size}, {num_jobs} jobs × {duration_desc}, iodepth={iodepth}, engine={engine})...' && "
         f"{prefill}"
@@ -458,6 +454,7 @@ async def create_workload(
     obj_size_mb: int = 64,
     workers: int = 8,
     engine: str = "libaio",
+    direct: bool = True,
 ):
     loop = asyncio.get_event_loop()
     if workload_type == "noobaa":
@@ -472,7 +469,7 @@ async def create_workload(
             loop.run_in_executor(None, _sync_create_io_workload,
                 kubeconfig_url, namespace, pvc_name, pod_name,
                 workload_type, size_gb, mode, pattern,
-                block_size, num_jobs, iodepth, duration_sec, engine),
+                block_size, num_jobs, iodepth, duration_sec, engine, direct),
             timeout=60.0,
         )
 

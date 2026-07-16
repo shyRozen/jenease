@@ -146,10 +146,12 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
     retry: false,
   })
 
+  const pausedAtTeardown = stageData?.stage === 'paused_input' && stageData?.paused_at === 'teardown'
+
   const { data: health } = useQuery({
     queryKey: ['health', c.cluster_name],
     queryFn: () => api.get<{ status: string; degraded_reason?: string | null }>(`/clusters/${c.cluster_name}/health`),
-    enabled: !c.building,
+    enabled: !c.building || pausedAtTeardown,
     staleTime: 30_000,
     retry: false,
   })
@@ -163,7 +165,7 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
     retry: false,
   })
 
-  const status = c.building ? 'Building'
+  const status = (c.building && !pausedAtTeardown) ? 'Building'
     : health ? health.status
     : jenkinsStatus(c)
 
@@ -181,13 +183,18 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
           {!isMe && <span className="text-[9px] font-mono text-text-muted shrink-0 w-16 truncate">{c.owner}</span>}
           <div className="flex flex-col shrink-0 w-32">
             <span className={`text-[10px] font-mono ${STATUS_COLORS[status]}`}>
-              {c.building && <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent-cyan animate-pulse mr-1" />}
+              {c.building && !pausedAtTeardown && (
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent-cyan animate-pulse mr-1" />
+              )}
               {status}
             </span>
             {status === 'DEGRADED' && health?.degraded_reason && (
               <span className="text-[9px] font-mono text-accent-amber">{health.degraded_reason}</span>
             )}
-            {c.building && stageData?.stage && (
+            {pausedAtTeardown && (
+              <span className="text-[9px] font-mono text-text-muted">paused · teardown</span>
+            )}
+            {c.building && !pausedAtTeardown && stageData?.stage && (
               <span className={`text-[9px] font-mono ${STAGE_COLORS[stageData.stage] ?? 'text-text-muted'}`}>
                 {stageData.stage === 'locker_queue' && stageData.queue_since
                   ? `locker_queue · ${ageStr(stageData.queue_since)}`
@@ -318,8 +325,13 @@ function groupClusters(
   for (const c of list) {
     let key: string
     if (by === 'stage' && c.building) {
-      const stage = qc ? getStageFromCache(qc, c.cluster_name) : null
-      key = stage ? `Building · ${stage}` : 'Building'
+      const { stage, paused_at } = qc ? getStageFromCache(qc, c.cluster_name) : { stage: null }
+      if (stage === 'paused_input' && paused_at === 'teardown') {
+        // Cluster is fully deployed, paused waiting for teardown input — group by health
+        key = (qc ? getHealthStatusFromCache(qc, c.cluster_name) : null) ?? 'Active'
+      } else {
+        key = stage ? `Building · ${stage}` : 'Building'
+      }
     } else {
       key = by === 'owner'    ? c.owner
           : by === 'platform' ? (PLATFORM_LABELS[detectPlatform(c.credentials_conf, c.platform_conf)] ?? 'Other')
@@ -340,9 +352,14 @@ function groupClusters(
 
 // ── main page ─────────────────────────────────────────────────────────────────
 
-function getStageFromCache(queryClient: ReturnType<typeof useQueryClient>, clusterName: string): string | null {
-  const d = queryClient.getQueryData<{ stage: string | null }>(['stage', clusterName])
-  return d?.stage ?? null
+function getStageFromCache(qc: ReturnType<typeof useQueryClient>, clusterName: string): { stage: string | null; paused_at?: string } {
+  const d = qc.getQueryData<{ stage: string | null; paused_at?: string }>(['stage', clusterName])
+  return { stage: d?.stage ?? null, paused_at: d?.paused_at }
+}
+
+function getHealthStatusFromCache(qc: ReturnType<typeof useQueryClient>, clusterName: string): string | null {
+  const d = qc.getQueryData<{ status: string }>(['health', clusterName])
+  return d?.status ?? null
 }
 
 export default function AllClusters({ username }: { username: string }) {

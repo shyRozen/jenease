@@ -51,8 +51,9 @@ function ageStr(iso: string): string {
   return h > 0 ? `${h}h ${m % 60}m` : `${m}m`
 }
 
-function StatusBadge({ status, building, stage, queueSince, pausedAt, degradedReason }: {
-  status: string; building: boolean; stage?: string | null; queueSince?: string | null
+function StatusBadge({ status, building, pausedAtTeardown, stage, queueSince, pausedAt, degradedReason }: {
+  status: string; building: boolean; pausedAtTeardown: boolean
+  stage?: string | null; queueSince?: string | null
   pausedAt?: string | null; degradedReason?: string | null
 }) {
   if (building) return (
@@ -84,6 +85,9 @@ function StatusBadge({ status, building, stage, queueSince, pausedAt, degradedRe
       </span>
       {status === 'DEGRADED' && degradedReason && (
         <span className="text-[10px] font-mono text-accent-amber">{degradedReason}</span>
+      )}
+      {pausedAtTeardown && (
+        <span className="text-[10px] font-mono text-text-muted">paused · teardown</span>
       )}
     </div>
   )
@@ -122,10 +126,12 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
     retry: false,
   })
 
+  const pausedAtTeardown = stageData?.stage === 'paused_input' && stageData?.paused_at === 'teardown'
+
   const { data: health, isLoading: healthLoading } = useQuery<HealthData>({
     queryKey: ['health', cluster.cluster_name],
     queryFn: () => api.get(`/clusters/${cluster.cluster_name}/health`),
-    enabled: !cluster.building,
+    enabled: !cluster.building || pausedAtTeardown,
     staleTime: 60_000,
     retry: false,
   })
@@ -163,7 +169,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
     }
   }
 
-  const status = cluster.building ? 'BUILDING' : health ? health.status : 'LOADING'
+  const status = (cluster.building && !pausedAtTeardown) ? 'BUILDING' : health ? health.status : 'LOADING'
   const platform = cluster.credentials_conf
     ? cluster.credentials_conf.replace(/-VC\d+$/, '').replace(/-/g, ' ').trim()
     : ''
@@ -193,7 +199,8 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
         </div>
         <StatusBadge
           status={status}
-          building={cluster.building}
+          building={cluster.building && !pausedAtTeardown}
+          pausedAtTeardown={pausedAtTeardown}
           stage={stageData?.stage}
           queueSince={stageData?.queue_since}
           pausedAt={stageData?.paused_at}
@@ -210,7 +217,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
         liveNodes={health?.nodes}
         osdCount={health?.osd_count}
         osdSize={cluster.osd_size}
-        loading={!cluster.building && healthLoading}
+        loading={(!cluster.building || pausedAtTeardown) && healthLoading}
       />
 
       {/* ODF health */}
@@ -231,7 +238,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
       {/* Footer */}
       <div className="space-y-2">
         {/* Abort button — only while building and owner */}
-        {isOwner && cluster.building && (
+        {isOwner && cluster.building && !pausedAtTeardown && (
           <div onClick={e => e.preventDefault()}>
             {abortState === 'done' ? (
               <p className="text-xs font-mono text-accent-amber">Abort sent — refreshing…</p>

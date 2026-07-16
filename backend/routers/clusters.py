@@ -374,6 +374,8 @@ async def cluster_health(cluster_name: str, session: dict = Depends(get_session)
             degraded_reason = "osd_not_in"
         elif any(n.get("unschedulable") for n in nodes):
             degraded_reason = "node_unschedulable"
+        elif not odf or odf_phase in ("Unknown", "", None):
+            degraded_reason = "odf_not_found"
         else:
             degraded_reason = None
 

@@ -57,7 +57,7 @@ class ThroughputSample(BaseModel):
     total: float
 
 
-@router.post("")
+@router.post("/")
 def start_session(body: StartRequest, auth: dict = Depends(get_session)):
     name = f"{body.cluster_name} {datetime.utcnow().strftime('%b %d %H:%M')}"
     ws = WorkloadSession(
@@ -113,7 +113,7 @@ def rename_session(session_id: int, body: RenameRequest, auth: dict = Depends(ge
     return {"ok": True}
 
 
-@router.get("")
+@router.get("/")
 def list_sessions(auth: dict = Depends(get_session)):
     with Session(engine) as db:
         rows = db.exec(

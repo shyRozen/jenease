@@ -264,7 +264,7 @@ export default function WorkloadPanel({
 
   const { data: sessions = [], refetch: refetchSessions } = useQuery<SessionSummary[]>({
     queryKey: ['sessions'],
-    queryFn: () => api.get('/sessions'),
+    queryFn: () => api.get('/sessions/'),
     staleTime: 30_000,
   })
 
@@ -356,7 +356,7 @@ export default function WorkloadPanel({
     setStartingRec(true)
     setRecordingError('')
     try {
-      const res = await api.post<{ id: number; name: string }>('/sessions', { cluster_name: clusterName })
+      const res = await api.post<{ id: number; name: string }>('/sessions/', { cluster_name: clusterName })
       setRecordingId(res.id)
       setRecordingStart(Date.now())
       setRecordingElapsed(0)

@@ -1,5 +1,7 @@
 """Deploy tab — job catalog, param schemas, and job triggering."""
 import asyncio
+import json
+import os
 import time
 from typing import Optional
 
@@ -12,10 +14,38 @@ from job_parser import parse_job
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
-# ── in-memory job catalog cache ─────────────────────────────────────────────
+# ── in-memory + disk catalog cache ──────────────────────────────────────────
 _catalog: list[dict] = []
 _catalog_ts: float = 0.0
 CACHE_TTL = 3600  # refresh hourly
+
+# Persist catalog to disk so container restarts don't require a full rebuild
+_CATALOG_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "catalog.json")
+
+
+def _load_catalog_from_disk() -> tuple[list[dict], float]:
+    try:
+        with open(_CATALOG_FILE) as f:
+            saved = json.load(f)
+        ts = saved.get("ts", 0.0)
+        if time.time() - ts < CACHE_TTL:
+            return saved["catalog"], ts
+    except Exception:
+        pass
+    return [], 0.0
+
+
+def _save_catalog_to_disk(catalog: list[dict], ts: float) -> None:
+    try:
+        os.makedirs(os.path.dirname(_CATALOG_FILE), exist_ok=True)
+        with open(_CATALOG_FILE, "w") as f:
+            json.dump({"ts": ts, "catalog": catalog}, f)
+    except Exception:
+        pass
+
+
+# Load from disk at import time so the first request is instant if cache is warm
+_catalog, _catalog_ts = _load_catalog_from_disk()
 
 DEPLOY_JOB_PATTERN = "deployment"
 FULL_DEPLOY_JOB = "qe-deploy-ocs-cluster"  # the underlying job with all 100+ params
@@ -80,42 +110,38 @@ async def _build_catalog(jenkins: JenkinsClient) -> list[dict]:
         full_params = []
 
     full_params_by_name = {p["name"]: p for p in full_params}
+    full_names = {p["name"] for p in full_params}
 
-    # Fetch trigger job params in batches
-    BATCH = 20
-    for i in range(0, len(parsed), BATCH):
-        batch = parsed[i:i+BATCH]
-        results = await asyncio.gather(
-            *[jenkins.get_job_params_schema(j["job_name"]) for j in batch],
-            return_exceptions=True,
-        )
-        for job_meta, trigger_raw in zip(batch, results):
-            if isinstance(trigger_raw, Exception):
-                job_meta["params"] = full_params[:]
-                continue
+    # Fetch all trigger job params in one parallel burst (no serial batching)
+    all_trigger_raw = await asyncio.gather(
+        *[jenkins.get_job_params_schema(j["job_name"]) for j in parsed],
+        return_exceptions=True,
+    )
 
-            trigger_params = _normalize_params(trigger_raw)
-            trigger_defaults = {
-                p["name"]: p["default"]
-                for p in trigger_params
-                if p["default"] not in ("", None)
-            }
+    for job_meta, trigger_raw in zip(parsed, all_trigger_raw):
+        if isinstance(trigger_raw, Exception):
+            job_meta["params"] = full_params[:]
+            continue
 
-            # Merge: full deploy params with trigger defaults applied
-            merged = []
-            for p in full_params:
-                overridden = dict(p)
-                if p["name"] in trigger_defaults:
-                    overridden["default"] = trigger_defaults[p["name"]]
-                merged.append(overridden)
+        trigger_params = _normalize_params(trigger_raw)
+        trigger_defaults = {
+            p["name"]: p["default"]
+            for p in trigger_params
+            if p["default"] not in ("", None)
+        }
 
-            # Add trigger-only params (e.g. CLUSTER_CONF preset)
-            full_names = {p["name"] for p in full_params}
-            for p in trigger_params:
-                if p["name"] not in full_names:
-                    merged.append(p)
+        merged = []
+        for p in full_params:
+            overridden = dict(p)
+            if p["name"] in trigger_defaults:
+                overridden["default"] = trigger_defaults[p["name"]]
+            merged.append(overridden)
 
-            job_meta["params"] = merged
+        for p in trigger_params:
+            if p["name"] not in full_names:
+                merged.append(p)
+
+        job_meta["params"] = merged
 
     return parsed
 
@@ -124,7 +150,7 @@ async def _build_catalog(jenkins: JenkinsClient) -> list[dict]:
 
 @router.get("/deployments")
 async def list_deployments(session: dict = Depends(get_session)):
-    """Return the cached job catalog (lazy-built on first call)."""
+    """Return the cached job catalog (disk-cached across restarts, rebuilt hourly)."""
     global _catalog, _catalog_ts
 
     if _catalog and (time.time() - _catalog_ts) < CACHE_TTL:
@@ -133,6 +159,7 @@ async def list_deployments(session: dict = Depends(get_session)):
     jenkins = _make_client(session)
     _catalog = await _build_catalog(jenkins)
     _catalog_ts = time.time()
+    _save_catalog_to_disk(_catalog, _catalog_ts)
     return _catalog
 
 

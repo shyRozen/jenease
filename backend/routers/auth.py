@@ -29,8 +29,10 @@ async def login(body: LoginRequest, response: Response):
         import time
         try:
             catalog = await jobs_module._build_catalog(client)
+            ts = time.time()
             jobs_module._catalog = catalog
-            jobs_module._catalog_ts = time.time()
+            jobs_module._catalog_ts = ts
+            jobs_module._save_catalog_to_disk(catalog, ts)
         except Exception:
             pass
     asyncio.create_task(_warm())

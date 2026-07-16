@@ -30,6 +30,7 @@ interface CephCapacity {
 
 interface HealthData {
   status: string
+  degraded_reason?: string | null
   nodes?: { role: string; ready: boolean; name: string }[]
   odf?: { phase: string; health: string }
   osd_count?: number
@@ -395,6 +396,11 @@ export default function ClusterDetail() {
                     : 'text-accent-amber border-accent-amber/30 bg-accent-amber/5'
                 }`}>
                   {health.ceph_capacity.health}
+                </span>
+              )}
+              {health?.status === 'DEGRADED' && health.degraded_reason && (
+                <span className="text-xs font-mono px-2 py-0.5 rounded border border-accent-amber/30 bg-accent-amber/5 text-accent-amber">
+                  ⚠ {health.degraded_reason}
                 </span>
               )}
               <div className="flex items-center gap-3 ml-auto text-xs font-mono text-text-muted">

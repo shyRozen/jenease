@@ -148,7 +148,7 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
 
   const { data: health } = useQuery({
     queryKey: ['health', c.cluster_name],
-    queryFn: () => api.get<{ status: string }>(`/clusters/${c.cluster_name}/health`),
+    queryFn: () => api.get<{ status: string; degraded_reason?: string | null }>(`/clusters/${c.cluster_name}/health`),
     enabled: !c.building,
     staleTime: 30_000,
     retry: false,
@@ -179,11 +179,14 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
             {c.cluster_name}
           </span>
           {!isMe && <span className="text-[9px] font-mono text-text-muted shrink-0 w-16 truncate">{c.owner}</span>}
-          <div className="flex flex-col shrink-0 w-28">
+          <div className="flex flex-col shrink-0 w-32">
             <span className={`text-[10px] font-mono ${STATUS_COLORS[status]}`}>
               {c.building && <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent-cyan animate-pulse mr-1" />}
               {status}
             </span>
+            {status === 'DEGRADED' && health?.degraded_reason && (
+              <span className="text-[9px] font-mono text-accent-amber">{health.degraded_reason}</span>
+            )}
             {c.building && stageData?.stage && (
               <span className={`text-[9px] font-mono ${STAGE_COLORS[stageData.stage] ?? 'text-text-muted'}`}>
                 {stageData.stage === 'locker_queue' && stageData.queue_since

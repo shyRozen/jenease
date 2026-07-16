@@ -25,6 +25,7 @@ interface ClusterInfo {
 
 interface HealthData {
   status: string
+  degraded_reason?: string | null
   nodes?: { role: string; ready: boolean; name: string }[]
   odf?: { phase: string; health: string }
   osd_count?: number
@@ -50,8 +51,9 @@ function ageStr(iso: string): string {
   return h > 0 ? `${h}h ${m % 60}m` : `${m}m`
 }
 
-function StatusBadge({ status, building, stage, queueSince, pausedAt }: {
-  status: string; building: boolean; stage?: string | null; queueSince?: string | null; pausedAt?: string | null
+function StatusBadge({ status, building, stage, queueSince, pausedAt, degradedReason }: {
+  status: string; building: boolean; stage?: string | null; queueSince?: string | null
+  pausedAt?: string | null; degradedReason?: string | null
 }) {
   if (building) return (
     <div className="flex flex-col items-end gap-0.5">
@@ -76,9 +78,14 @@ function StatusBadge({ status, building, stage, queueSince, pausedAt }: {
   }
   const s = map[status] ?? map.UNREACHABLE
   return (
-    <span className={`flex items-center gap-1.5 text-xs font-mono ${s.text}`}>
-      <span className={`w-2 h-2 rounded-full ${s.dot}`} />{status}
-    </span>
+    <div className="flex flex-col items-end gap-0.5">
+      <span className={`flex items-center gap-1.5 text-xs font-mono ${s.text}`}>
+        <span className={`w-2 h-2 rounded-full ${s.dot}`} />{status}
+      </span>
+      {status === 'DEGRADED' && degradedReason && (
+        <span className="text-[10px] font-mono text-accent-amber">{degradedReason}</span>
+      )}
+    </div>
   )
 }
 
@@ -190,6 +197,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
           stage={stageData?.stage}
           queueSince={stageData?.queue_since}
           pausedAt={stageData?.paused_at}
+          degradedReason={health?.degraded_reason}
         />
       </div>
 

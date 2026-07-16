@@ -333,16 +333,53 @@ async def cluster_health(cluster_name: str, session: dict = Depends(get_session)
 
     nodes = health.get("nodes", [])
     odf = health.get("odf", {})
-    osd_count = health.get("osd_count", 0)
 
     all_ready = all(n["ready"] for n in nodes)
     odf_phase = odf.get("phase", "Unknown")
     odf_ok = odf_phase == "Ready"
+    osd_up = health.get("osd_up") or 0
+    osd_in = health.get("osd_in") or 0
+    osd_count = health.get("osd_count", 0)
+    ceph_health = (health.get("ceph_capacity") or {}).get("health", "")
 
-    status = "HEALTHY" if (all_ready and odf_ok) else "DEGRADED" if nodes else "UNREACHABLE"
+    if all_ready and odf_ok:
+        status = "HEALTHY"
+        degraded_reason = None
+    elif not nodes:
+        status = "UNREACHABLE"
+        degraded_reason = None
+    else:
+        status = "DEGRADED"
+        # Priority: osd_down > ceph_err > node_not_ready > odf_error >
+        #           node_pressure > ceph_warn > odf_progressing > node_unschedulable
+        if osd_count > 0 and osd_up < osd_count:
+            degraded_reason = "osd_down"
+        elif ceph_health == "HEALTH_ERR":
+            degraded_reason = "ceph_err"
+        elif any(not n["ready"] for n in nodes):
+            degraded_reason = "node_not_ready"
+        elif odf_phase in ("Error", "Failed"):
+            degraded_reason = "odf_error"
+        elif any(
+            c in str(n.get("conditions", {}))
+            for n in nodes
+            for c in ("DiskPressure=True", "MemoryPressure=True", "PIDPressure=True")
+        ):
+            degraded_reason = "node_pressure"
+        elif ceph_health == "HEALTH_WARN":
+            degraded_reason = "ceph_warn"
+        elif odf_phase in ("Progressing", "Initializing", "Updating"):
+            degraded_reason = "odf_progressing"
+        elif osd_count > 0 and osd_in < osd_count:
+            degraded_reason = "osd_not_in"
+        elif any(n.get("unschedulable") for n in nodes):
+            degraded_reason = "node_unschedulable"
+        else:
+            degraded_reason = None
 
     return {
         "status": status,
+        "degraded_reason": degraded_reason,
         "nodes": nodes,
         "odf": odf,
         "osd_count": osd_count,

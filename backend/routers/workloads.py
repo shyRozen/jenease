@@ -239,7 +239,7 @@ async def cleanup_stream(
                         db.commit()
             yield {"data": json.dumps({"line": line, "done": done})}
 
-    return EventSourceResponse(generate())
+    return EventSourceResponse(generate(), headers={"Content-Encoding": "identity"})
 
 
 @router.post("/{cluster_name}/workloads/purge")
@@ -325,4 +325,5 @@ async def stream_logs(
             parsed = parse_fio_line(line, size_bytes=size_bytes)
             yield {"data": json.dumps(parsed)}
 
-    return EventSourceResponse(generate())
+    # Content-Encoding: identity prevents GZipMiddleware from buffering the SSE stream
+    return EventSourceResponse(generate(), headers={"Content-Encoding": "identity"})

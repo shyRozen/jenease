@@ -286,8 +286,8 @@ def _sync_create_io_workload(
 
     time_flags = f"--time_based --runtime={duration_sec}" if duration_sec > 0 else ""
     # RBD (block device): --direct=1 bypasses page cache for real measurements
-    # CephFS: O_DIRECT not supported → use --end_fsync=1 to flush to storage at job end
-    io_flags = "--direct=1" if workload_type == "rbd" else "--end_fsync=1"
+    # CephFS: O_DIRECT not supported, skip direct flag (buffered IO)
+    io_flags = "--direct=1" if workload_type == "rbd" else ""
     cmd = (
         f"echo '[jenease] Starting fio ({fio_rw}, bs={block_size}, {num_jobs} jobs × {duration_desc}, iodepth={iodepth})...' && "
         f"{prefill}"

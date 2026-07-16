@@ -12,9 +12,9 @@ Browser (React + Vite)
     ↕ /api/* proxy
 FastAPI backend (Python)
     ↕ Basic Auth (username:token from cookie)
-Jenkins (prod: jenkins-csb-odf-qe-ocs4.dno.corp.redhat.com)
+Jenkins
     ↕
-magna002.ceph.redhat.com  (kubeconfig download, NFS HTTP server)
+NFS HTTP server (kubeconfig download)
     ↕
 OCP clusters (via squid proxy from kubeconfig proxy-url field)
     ↕
@@ -120,7 +120,7 @@ RLocker (locker queue status, no auth needed)
 
 ## Server Configuration
 
-**Production server:** `10.1.161.147` → `jenease.qe.rh-ocs.com`  
+**Production server:** internal server behind company network  
 **Stack:** Docker Compose behind Apache httpd
 
 ### `.env` file (`/opt/jenease/.env`):
@@ -133,7 +133,6 @@ JENKINS_WARM_TOKEN=<token>      # optional
 
 ### Update server:
 ```bash
-ssh root@10.1.161.147
 cd /opt/jenease && git pull && docker compose up -d --build
 ```
 
@@ -155,7 +154,7 @@ npm run dev -- --port 5199
 ## Key Technical Notes
 
 ### Kubeconfig & Proxy
-Kubeconfig from magna002 contains `proxy-url` for IPv6 clusters. Python k8s client ignores it — extracted and set manually. OAuth token for Prometheus also fetched through the proxy.
+Kubeconfig served from an internal NFS HTTP server contains `proxy-url` for IPv6 clusters. Python k8s client ignores it — extracted and set manually. OAuth token for Prometheus also fetched through the proxy.
 
 ### Prometheus IOPS
 - `irate(ceph_osd_op_r/w[15s])` via Thanos external route
@@ -165,7 +164,7 @@ Kubeconfig from magna002 contains `proxy-url` for IPv6 clusters. Python k8s clie
 ### Deployment Stage Detection
 - `GET /wfapi/describe` on the Jenkins build
 - `PAUSED_PENDING_INPUT` detected at wfapi level
-- Locker queue: scrapes HTML at `odf-resourcelocker.apps.int.spoke.prod.us-east-1.aws.paas.redhat.com/pendingrequests/` (public, no auth)
+- Locker queue: scrapes the internal RLocker pending requests page (public within company network, no auth needed)
 - Matches by build URL in the JSON data embedded in table rows
 
 ### Workload fio

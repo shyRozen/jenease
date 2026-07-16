@@ -402,6 +402,18 @@ async def cluster_stage(cluster_name: str, session: dict = Depends(get_session))
     except Exception:
         return {"stage": None}
 
+    # Check for paused-pending-input at the overall or stage level
+    paused_at: Optional[str] = None
+    if wf.get("status") == "PAUSED_PENDING_INPUT":
+        for s in wf.get("stages", []):
+            if s.get("status") == "PAUSED_PENDING_INPUT":
+                paused_at = STAGE_SHORT.get(s["name"], s["name"].lower().replace(" ", "_"))
+                break
+
+    if paused_at is not None:
+        result: dict = {"stage": "paused_input", "paused_at": paused_at}
+        return result
+
     # Find the currently in-progress stage
     current: Optional[str] = None
     for s in wf.get("stages", []):

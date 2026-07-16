@@ -74,6 +74,7 @@ const STATUS_COLORS: Record<string, string> = {
 
 const STAGE_COLORS: Record<string, string> = {
   locker_queue:   'text-accent-amber',
+  paused_input:   'text-accent-amber',
   init:           'text-text-muted',
   prepare_jslave: 'text-text-muted',
   install_ocp:    'text-accent-cyan',
@@ -136,7 +137,7 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
   const platform = detectPlatform(c.credentials_conf, c.platform_conf)
   const isMe = c.owner === me
 
-  const { data: stageData } = useQuery<{ stage: string | null; queue_since?: string }>({
+  const { data: stageData } = useQuery<{ stage: string | null; queue_since?: string; paused_at?: string }>({
     queryKey: ['stage', c.cluster_name],
     queryFn: () => api.get(`/clusters/${c.cluster_name}/stage`),
     enabled: c.building,
@@ -185,9 +186,11 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
             </span>
             {c.building && stageData?.stage && (
               <span className={`text-[9px] font-mono ${STAGE_COLORS[stageData.stage] ?? 'text-text-muted'}`}>
-                {stageData.stage}
                 {stageData.stage === 'locker_queue' && stageData.queue_since
-                  ? ` · ${ageStr(stageData.queue_since)}` : ''}
+                  ? `locker_queue · ${ageStr(stageData.queue_since)}`
+                  : stageData.stage === 'paused_input' && stageData.paused_at
+                  ? `paused · ${stageData.paused_at}`
+                  : stageData.stage}
               </span>
             )}
           </div>

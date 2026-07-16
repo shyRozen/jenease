@@ -32,6 +32,7 @@ interface HealthData {
 
 const STAGE_COLORS: Record<string, string> = {
   locker_queue:  'text-accent-amber',
+  paused_input:  'text-accent-amber',
   init:          'text-text-muted',
   prepare_jslave:'text-text-muted',
   install_ocp:   'text-accent-cyan',
@@ -49,8 +50,8 @@ function ageStr(iso: string): string {
   return h > 0 ? `${h}h ${m % 60}m` : `${m}m`
 }
 
-function StatusBadge({ status, building, stage, queueSince }: {
-  status: string; building: boolean; stage?: string | null; queueSince?: string | null
+function StatusBadge({ status, building, stage, queueSince, pausedAt }: {
+  status: string; building: boolean; stage?: string | null; queueSince?: string | null; pausedAt?: string | null
 }) {
   if (building) return (
     <div className="flex flex-col items-end gap-0.5">
@@ -59,7 +60,9 @@ function StatusBadge({ status, building, stage, queueSince }: {
       </span>
       {stage && (
         <span className={`text-[10px] font-mono ${STAGE_COLORS[stage] ?? 'text-text-muted'}`}>
-          {stage}{stage === 'locker_queue' && queueSince ? ` · ${ageStr(queueSince)}` : ''}
+          {stage === 'locker_queue' && queueSince ? `locker_queue · ${ageStr(queueSince)}`
+            : stage === 'paused_input' && pausedAt ? `paused · ${pausedAt}`
+            : stage}
         </span>
       )}
     </div>
@@ -103,7 +106,7 @@ function PwField({ password }: { password?: string }) {
 }
 
 export default function ClusterCard({ cluster, isOwner = true }: { cluster: ClusterInfo; isOwner?: boolean }) {
-  const { data: stageData } = useQuery<{ stage: string | null; queue_since?: string }>({
+  const { data: stageData } = useQuery<{ stage: string | null; queue_since?: string; paused_at?: string }>({
     queryKey: ['stage', cluster.cluster_name],
     queryFn: () => api.get(`/clusters/${cluster.cluster_name}/stage`),
     enabled: cluster.building,
@@ -186,6 +189,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
           building={cluster.building}
           stage={stageData?.stage}
           queueSince={stageData?.queue_since}
+          pausedAt={stageData?.paused_at}
         />
       </div>
 

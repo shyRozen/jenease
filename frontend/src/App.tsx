@@ -24,6 +24,13 @@ function PrefetchManager({ username }: { username: string }) {
   const queryClient = useQueryClient()
 
   useEffect(() => {
+    // Kick off catalog prefetch immediately — runs in background while user is on any page
+    queryClient.prefetchQuery({
+      queryKey: ['deployments'],
+      queryFn: () => api.get('/jobs/deployments'),
+      staleTime: 3_600_000,
+    })
+
     // Step 1: fetch all clusters list
     queryClient.fetchQuery<any[]>({
       queryKey: ['all-clusters'],

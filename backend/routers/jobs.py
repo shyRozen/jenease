@@ -17,7 +17,8 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 # ── in-memory + disk catalog cache ──────────────────────────────────────────
 _catalog: list[dict] = []
 _catalog_ts: float = 0.0
-CACHE_TTL = 3600  # refresh hourly
+CACHE_TTL = 3600        # in-memory refresh interval (1h)
+DISK_CACHE_TTL = 28800  # disk cache valid for 8h — survives restarts across a workday
 
 # Persist catalog to disk so container restarts don't require a full rebuild
 _CATALOG_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "catalog.json")
@@ -28,7 +29,7 @@ def _load_catalog_from_disk() -> tuple[list[dict], float]:
         with open(_CATALOG_FILE) as f:
             saved = json.load(f)
         ts = saved.get("ts", 0.0)
-        if time.time() - ts < CACHE_TTL:
+        if time.time() - ts < DISK_CACHE_TTL:
             return saved["catalog"], ts
     except Exception:
         pass

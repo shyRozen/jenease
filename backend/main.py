@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from sqlmodel import SQLModel
 
 from config import settings
@@ -54,6 +55,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Jenease", lifespan=lifespan)
 
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:5199"],

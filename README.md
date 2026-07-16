@@ -1,4 +1,4 @@
-# Jenease — Jenkins Cluster Management Web App
+# JenEase — Jenkins Cluster Management Web App
 
 A modern web interface for deploying and managing OCS/ODF clusters via Jenkins.  
 Replaces the 100+ parameter Jenkins form with a fast, searchable, team-friendly UI.
@@ -18,7 +18,9 @@ magna002.ceph.redhat.com  (kubeconfig download, NFS HTTP server)
     ↕
 OCP clusters (via squid proxy from kubeconfig proxy-url field)
     ↕
-Prometheus/Thanos (IOPS via OAuth token + squid proxy)
+Prometheus/Thanos (IOPS via OAuth + squid proxy)
+    ↕
+RLocker (locker queue status, no auth needed)
 ```
 
 **Stack:** React + TypeScript + Tailwind CSS (Vite) · FastAPI + Python · SQLite · Docker Compose
@@ -28,125 +30,111 @@ Prometheus/Thanos (IOPS via OAuth token + squid proxy)
 ## Features
 
 ### My Clusters
-- Detects active clusters by parsing `qe-deploy-ocs-cluster` build descriptions AND checking `CLUSTER_NAME` build parameters (catches early-stage builds before description is written)
-- Clusters with a running or successful destroy job are automatically removed from the list
-- Each cluster card: node diagram (M/W icons), OSD disk tiles, ODF status, kubeadmin password (blurred), links
-- Click a card → full detail view: OCP node panels, ODF capacity bar, OSD tiles, pod swimlanes, PVCs
-- Parallel async health queries per cluster:
-  - Downloads kubeconfig from magna002 (contains `proxy-url` for IPv6 clusters)
-  - Queries OCP nodes, ODF StorageCluster CR, OSD pods, CephCluster CR (capacity)
-  - Queries Prometheus via Thanos external route for per-OSD IOPS (`irate(ceph_osd_op_r/w[2m])`)
-  - 30-second timeout on all kubernetes calls (prevents hanging on dead clusters)
-- **Abort button** on building clusters (two-click confirmation)
-- **Destroy button** on completed clusters → opens modal with FORCE_JSLAVE_DESTROY, LONGEVITY_CLUSTER, DO_NOT_RELEASE_LOCK options; cleanup shown step-by-step in log terminal (pod → PVC → namespace)
-- Health data refreshes every **2 seconds** when a workload is running, 30 seconds otherwise
+- Detects active clusters by parsing `qe-deploy-ocs-cluster` build descriptions AND `CLUSTER_NAME` param (catches early-stage builds)
+- Clusters with running/successful destroy jobs automatically removed from list
+- **Abort button** on building clusters · **Destroy button** on all clusters (own only)
+- Auto-refresh every 30s
 
 ### Cluster Detail View
-- OCP node panels (conditions, kubelet version)
-- ODF status: phase badge, HEALTH_OK/WARN badge, up/in/total OSD count
-- Real Ceph capacity bar (bytes from CephCluster CR)
-- Individual OSD tiles with:
-  - Per-disk capacity bar and % used
-  - Live R/W IOPS from Prometheus (updates every 2s during workloads)
-- ODF pod swimlanes (MON, OSD, MGR, MDS, CSI RBD/CephFS, NooBaa, etc.)
-- PVC list
-- Full OCP version (from ClusterVersion CR), full ODF version (from CSV)
-- **Workload panel** (right side): launch and monitor IO workloads directly from the UI
+- OCP node panels, ODF capacity bar, OSD tiles with per-disk capacity + **live R/W IOPS**
+- IOPS: `irate(ceph_osd_op_r/w[15s])` via Thanos — updates every 3s (cluster scrapes every 1s)
+- ODF pod swimlanes, PVC list
+- Full OCP/ODF versions from CRs
+- **Workload panel** (right side, owner only): launch IO workloads against the cluster
+- Health refreshes every **3 seconds** always (was conditional on workloads)
+
+### Health Status
+- `HEALTHY` / `DEGRADED` / `UNREACHABLE` / `BUILDING`
+- **DEGRADED sub-status** (priority order):
+  - `osd_down` — OSDs not up
+  - `ceph_err` — HEALTH_ERR
+  - `node_not_ready` — node(s) not Ready
+  - `odf_error` — StorageCluster Error/Failed
+  - `node_pressure` — DiskPressure/MemoryPressure/PIDPressure
+  - `ceph_warn` — HEALTH_WARN
+  - `odf_progressing` — OCS upgrading/initializing
+  - `osd_not_in` — OSDs not in
+  - `node_unschedulable` — cordoned node
+  - `odf_not_found` — ODF not installed or CR 404
+
+### Deployment Stage Tracking (Building Clusters)
+- `GET /api/clusters/{name}/stage` queries Jenkins `wfapi/describe`
+- Shows current pipeline stage below `BUILDING` badge:
+  - `init` · `prepare_jslave` · `install_ocp` · `install_ocs` · `rhcs` · `upgrade` · `test` · `teardown`
+  - `locker_queue · Xh Ym` — stuck waiting for resource lock (checks RLocker queue)
+  - `paused · <stage>` — `PAUSED_PENDING_INPUT` with stage it's waiting in
+- Stage polls every 30s, only for building clusters
+- Works even for early builds with no description yet (fetches CLUSTER_NAME param)
 
 ### IO Workloads
-- Launch RBD, CephFS, or NooBaa IO workloads directly against a live cluster
-- **RBD / CephFS**: fio 3.41 (`quay.io/ocsci/nginx:latest` — Alpine + fio pre-installed)
-  - `libaio`, `direct=1`, `numjobs=4`, `iodepth=16` (sequential) / `iodepth=32` (random)
-  - Sequential: `bs=1m` · Random: `bs=4k`
-  - fsync every 64MB so capacity changes are visible in real time
-- **NooBaa**: Python + boto3 writing/reading S3 objects via ObjectBucketClaim
-- Parameters: Type (RBD/CephFS/NooBaa), Size (1/10/50/100 GB), Mode (Write/Read/R+W), Pattern (Sequential/Random)
-- Live log terminal in the workload card (SSE stream with `withCredentials`)
-- Progress bar computed from fio's `io=NMiB` output and the total workload size
-- IO rate displayed in MB/s
-- Cleanup shows step-by-step in the log terminal (pod → PVC → namespace)
-- Purge button to force-remove all orphaned `jenease-wl-*` namespaces (including those stuck on NooBaa OBC finalizers)
-- Workload records survive navigation (stored in SQLite), auto-removed on cleanup
+- Launch RBD, CephFS, or NooBaa workloads from cluster detail (owner only)
+- **RBD / CephFS**: `quay.io/ocsci/nginx:latest` (Alpine + fio 3.41)
+  - `numjobs=4`, `bs=1m iodepth=32` (sequential), `bs=4k iodepth=64` (random)
+  - Per-job size = total_size / numjobs (fixes 4× PVC overflow bug)
+- **NooBaa**: `ubi9/python-311` + boto3, 8 workers × 64MB objects
+- Live log terminal (SSE), progress bar from fio output, rate in MB/s
+- **Throughput chart**: live SVG chart with RBD/CephFS/NooBaa/Total lines
+  - 60s moving window, drag right to scroll history (up to 10 min)
+  - Throughput summary bar below chart
+- Cleanup: pod → OBC finalizer → PVC → namespace (shown in log terminal)
+- Purge button for orphaned `jenease-wl-*` namespaces
+
+### All Clusters Page (`/all-clusters`)
+- Shows ALL active clusters across all Jenkins users (not just yours)
+- `GET /api/clusters/all` — same logic as active_clusters, no username filter, adds `owner` field
+- Real health queries per cluster + details prefetch for healthy/degraded
+- **Features**: multi-token search, filter chips (Platform/Status/Owner), sort (6 options), group by (Owner/Platform/Status/**Stage**/OCP/OCS)
+- **Stage grouping**: building clusters split by stage (e.g., "Building · install_ocp (3)")
+- Box view (ClusterCards) + List view with all links inline
+- Destroy button for own clusters only; workload launcher hidden for other users' clusters
+
+### Prefetch Cascade on Login
+- `PrefetchManager` in App.tsx fetches all-clusters immediately after login
+- Staggers health queries (150ms apart) across all clusters
+- Prefetches details for healthy/degraded clusters in background
+- Job catalog warmed using authenticated user's token on login
 
 ### Deploy Tab
-- 179 `qe-trigger-*-deployment` pre-configured jobs loaded at startup (cached 1h)
-- **Multi-token any-order search**: "vsphere ipv6" finds all vsphere+ipv6 configs
-- **Filter chips**: Platform (OR within group), Installer, Topology, Storage, Features
-- Grid and list view with sort
-- Each card: inline OCP/OCS/OSD version dropdowns, auto-suggested cluster name (≤15 chars), Build + Modify buttons
-- **All builds go to `qe-deploy-ocs-cluster`** (not production trigger jobs), with non-prod defaults:
-  - `RUN_TEST=false`, `LOCK_PRIORITY=3`, `REPORT_PORTAL=false`, `COLLECT_LOGS_ON_SUCCESS=false`, `PRODUCTION_RUN=false`, `CLUSTER_PREFIX=''`
-  - vSphere credentials forced to `vSphere8-DC-CP_VC1` (or IPv6 variant) — not production ECO
-- **Modify drawer**: full 93-param form (pre-loaded from catalog, opens instantly), searchable, grouped booleans with `?` tooltips, `FULL_PLATFORM_CONF` searchable combobox
-- After Build: shows spinner → API call display (no token) → "✓ Triggered" → navigates to My Clusters with cluster name pre-filled and search bar blinking 6×
+- 179 `qe-trigger-*-deployment` jobs, pre-loaded at startup (catalog warmed on login)
+- Multi-token search, filter chips, grid/list view
+- All builds → `qe-deploy-ocs-cluster` with non-prod defaults enforced
+- Modify drawer: 93 params, searchable, grouped booleans with `?` tooltips
 
 ### Agents
-- Lists user's Jenkins agents by username prefix
-- Status: busy/idle/offline with color coding
+- Lists user's Jenkins agents by username prefix, status (busy/idle/offline)
 
 ---
 
 ## Cluster Name Convention
-- Max **15 characters** (Jenkins validation)
-- Pattern: `{username}{n?}-{platform_abbrev}-{storage_abbrev}`
-- Platform abbreviations: `a`=aws, `v`=vsphere, `az`=azure, `ib`=ibmcloud, `bm`=baremetal, `g`=gcp
-- Storage abbreviations: `vs`=vsan, `vm`=vmfs, `ls`=lso, `nv`=nvme, `lr`=lso-rdm, `lv`=lso-vmdk
-- Number 1–9 automatically chosen to avoid collision with existing agents/builds
+- Max **15 characters**, pattern: `{username}{n?}-{platform_abbrev}-{storage_abbrev}`
 - Examples: `srozen1-v-vs` (vSphere vSAN), `srozen2-a-ls` (AWS LSO)
 
 ---
 
 ## Authentication
-- Login page: Jenkins username + API token, with **Remember me** checkbox (default: checked)
-  - Checked → 30-day persistent cookie
-  - Unchecked → session cookie (expires on browser close)
-- Token stored in a signed httpOnly cookie (`itsdangerous` library)
-- Token **never stored on server** — decoded from cookie per request
-- If Jenkins returns 401 (wrong instance/expired token): backend returns 401 → frontend clears cookie → redirects to login
-- Session-aware: `/auth/me` 401 is handled silently (shows login page), other 401s trigger logout
+- Login: Jenkins username + API token, **Remember me** checkbox (default: 30-day cookie)
+- Token in signed httpOnly cookie, never on server
+- 401 from Jenkins → clears cookie → login page
 
 ---
 
 ## Server Configuration
 
-**Target server:** `10.1.161.147` (Fedora, inside Red Hat network)
+**Production server:** `10.1.161.147` → `jenease.qe.rh-ocs.com`  
+**Stack:** Docker Compose behind Apache httpd
 
-**Deployment:** Docker Compose on port 8080 (backend) and 8082 (frontend), behind Apache reverse proxy.
-
-### Apache config (add to existing httpd):
-```apache
-ProxyPass        /jenease/api  http://127.0.0.1:8080/api
-ProxyPassReverse /jenease/api  http://127.0.0.1:8080/api
-ProxyPass        /jenease      http://127.0.0.1:8082
-ProxyPassReverse /jenease      http://127.0.0.1:8082
-```
-
-### `.env` file (never commit):
+### `.env` file (`/opt/jenease/.env`):
 ```
 JENKINS_URL=https://your-jenkins-instance.example.com
-SECRET_KEY=<random 32-char string>   # python3 -c "import secrets; print(secrets.token_hex(32))"
-JENKINS_WARM_USER=<your-username>    # optional: pre-warms job catalog at startup
-JENKINS_WARM_TOKEN=<your-token>      # optional: pre-warms job catalog at startup
+SECRET_KEY=<random 32-char string>
+JENKINS_WARM_USER=<username>    # optional
+JENKINS_WARM_TOKEN=<token>      # optional
 ```
 
-### Install Docker on Fedora:
+### Update server:
 ```bash
-dnf install -y dnf-plugins-core
-dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
-dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-systemctl enable --now docker
-```
-
-### Deploy:
-```bash
-git clone https://github.com/shyRozen/jenease jenease && cd jenease
-cp .env.example .env && vi .env   # fill in JENKINS_URL and SECRET_KEY
-docker compose up -d --build
-```
-
-### Update:
-```bash
-git pull && docker compose up -d --build
+ssh root@10.1.161.147
+cd /opt/jenease && git pull && docker compose up -d --build
 ```
 
 ---
@@ -155,12 +143,11 @@ git pull && docker compose up -d --build
 
 ```bash
 # Backend (from jenease/backend/)
-pip install -r requirements.txt
-JENKINS_URL=https://... SECRET_KEY=dev-secret uvicorn main:app --port 8099
+JENKINS_URL=https://... /usr/bin/python3 -m uvicorn main:app --port 8099
+# Note: unset JENKINS_URL env var if set in shell (overrides .env)
 
 # Frontend (from jenease/frontend/)
-npm install && npm run dev -- --port 5199
-# Vite proxies /api → localhost:8099
+npm run dev -- --port 5199
 ```
 
 ---
@@ -168,52 +155,27 @@ npm install && npm run dev -- --port 5199
 ## Key Technical Notes
 
 ### Kubeconfig & Proxy
-Kubeconfig is served from magna002 — no auth needed. Contains `proxy-url: http://10.1.112.21:3128` for IPv6 clusters (squid proxy). The Python `kubernetes` client ignores `proxy-url` by default — we extract and set `cfg.proxy` manually.
+Kubeconfig from magna002 contains `proxy-url` for IPv6 clusters. Python k8s client ignores it — extracted and set manually. OAuth token for Prometheus also fetched through the proxy.
 
-### Per-OSD IOPS (Prometheus)
-- Query: `irate(ceph_osd_op_r/w[2m])` via Thanos external route
-- Auth: OAuth token obtained through squid proxy using kubeadmin credentials
-- Falls back gracefully if Prometheus is unreachable
-- Refreshes every 2s when a workload is running
+### Prometheus IOPS
+- `irate(ceph_osd_op_r/w[15s])` via Thanos external route
+- Cluster scrapes Ceph at **1s interval** (verified via range query)
+- Auth: OAuth Bearer token obtained through squid proxy
 
-### Active Cluster Detection
-1. Fetch last 200 `qe-deploy-ocs-cluster` builds
-2. Parse cluster name from build description URL (`/openshift-clusters/{name}/`)
-3. For `building=True` builds with no description yet: fetch `CLUSTER_NAME` parameter
-4. Cross-reference with `qe-destroy-ocs-cluster` builds (running OR successful destroys remove the cluster)
-5. Filter to builds where cluster name starts with `{username}`
+### Deployment Stage Detection
+- `GET /wfapi/describe` on the Jenkins build
+- `PAUSED_PENDING_INPUT` detected at wfapi level
+- Locker queue: scrapes HTML at `odf-resourcelocker.apps.int.spoke.prod.us-east-1.aws.paas.redhat.com/pendingrequests/` (public, no auth)
+- Matches by build URL in the JSON data embedded in table rows
 
-### Workload Cleanup
-- Explicit order: pod → OBC finalizer removal → PVC → namespace
-- Cleanup progress streamed via SSE to the log terminal
-- Stuck NooBaa namespaces: OBC finalizers are patched to `[]` before namespace deletion
-- Purge endpoint: finds all `jenease-wl-*` namespaces and force-deletes them
+### Workload fio
+- Image: `quay.io/ocsci/nginx:latest` (Alpine + fio 3.41, accessible from cluster nodes)
+- `--fallocate=none` — no pre-allocation delay
+- Per-job size = `total_gb / NUMJOBS` to fit within PVC
+- anyuid SCC granted to workload namespace
 
-### Job Catalog
-- Built from 179 `qe-trigger-*-deployment` jobs at startup (background task)
-- Each job: trigger job params merged with full `qe-deploy-ocs-cluster` param schema (93 params)
-- Cached in memory for 1 hour
-
-### Build Flow
-1. User picks job in Deploy tab → clicks Build (card) or Modify → Build (drawer)
-2. Backend: redirects to `qe-deploy-ocs-cluster`, enforces non-prod params, forces DC-CP credentials for vSphere
-3. After success: navigates to My Clusters with `?highlight={cluster_name}` → search bar pre-filled and blinks 6×
-
----
-
-## Jenkins API Used
-
-| Operation | Endpoint |
-|---|---|
-| Validate credentials | `GET /user/{username}/api/json` |
-| List builds | `GET /job/{job}/api/json?tree=builds[...]` |
-| Get build params | `GET /job/{job}/{n}/api/json` → `actions[].parameters[]` |
-| Trigger job | `POST /job/{job}/buildWithParameters` (form-encoded) |
-| Abort build | `POST /job/{job}/{n}/stop` |
-| List agents | `GET /computer/api/json` |
-| Queue status | `GET /queue/item/{n}/api/json` |
-
-Auth: `Authorization: Basic base64(username:token)` — no CSRF crumb needed for API tokens.
+### All Clusters Owner Detection
+- `owner` derived from cluster name alphabetic prefix: `srozen1-v-vs` → `srozen`
 
 ---
 
@@ -222,49 +184,38 @@ Auth: `Authorization: Basic base64(username:token)` — no CSRF crumb needed for
 ```
 jenease/
 ├── backend/
-│   ├── main.py              # FastAPI app, lifespan (catalog warm-up)
-│   ├── config.py            # Settings from .env
-│   ├── auth.py              # Cookie sign/verify (itsdangerous)
-│   ├── jenkins.py           # JenkinsClient — all Jenkins API calls
-│   ├── cluster_health.py    # k8s health queries + Prometheus IOPS
+│   ├── main.py              # FastAPI app, catalog warm-up, PrefetchManager hint
+│   ├── cluster_health.py    # k8s health + Prometheus IOPS + degraded sub-status
 │   ├── workload_runner.py   # k8s workload create/delete/log-stream (fio/NooBaa)
-│   ├── job_parser.py        # Parses qe-trigger-* job names into metadata
-│   ├── models.py            # SQLModel DB models (Preset, Workload)
-│   ├── database.py          # SQLite engine
 │   ├── routers/
-│   │   ├── auth.py          # /api/auth/login, /me, /logout
-│   │   ├── clusters.py      # /api/clusters/active, /health, /details, /abort, /destroy, /kubeconfig
-│   │   ├── agents.py        # /api/agents
-│   │   ├── names.py         # /api/suggest-name
-│   │   ├── jobs.py          # /api/jobs/deployments, /trigger
-│   │   └── workloads.py     # /api/clusters/{name}/workloads (CRUD + SSE logs/cleanup)
-│   ├── data/                # SQLite DB (gitignored)
-│   ├── requirements.txt
+│   │   ├── clusters.py      # /active, /all, /health (w/ degraded_reason), /stage, /details, /destroy
+│   │   ├── workloads.py     # CRUD + SSE logs/cleanup
+│   │   ├── jobs.py          # Deploy catalog + trigger
+│   │   ├── auth.py          # Login (catalog warm on login)
+│   │   ├── agents.py
+│   │   └── names.py
 │   └── Dockerfile
 ├── frontend/
 │   ├── src/
-│   │   ├── App.tsx          # Router, auth check
-│   │   ├── api/client.ts    # fetch wrapper, 401 → logout
-│   │   ├── hooks/useLiveFilter.ts   # multi-token any-order search
+│   │   ├── App.tsx          # Router + PrefetchManager (login cascade)
 │   │   ├── components/
-│   │   │   ├── Layout.tsx        # Sidebar nav
-│   │   │   ├── ClusterCard.tsx   # Card + prefetch details query + destroy button
-│   │   │   ├── DestroyDrawer.tsx # Destroy modal with cleanup SSE log
-│   │   │   ├── NodeDiagram.tsx   # Node rack visual
-│   │   │   ├── JobCard.tsx       # Deploy job card
-│   │   │   ├── ModifyDrawer.tsx  # Full 93-param form
-│   │   │   ├── WorkloadPanel.tsx # IO workload launcher + live log terminal
-│   │   │   └── SearchBar.tsx     # Search with × clear + blink animation
+│   │   │   ├── ClusterCard.tsx   # Health + stage + degraded_reason display
+│   │   │   ├── DestroyDrawer.tsx
+│   │   │   ├── WorkloadPanel.tsx # Launcher + workload list
+│   │   │   └── ThroughputChart.tsx  # Live SVG throughput chart
 │   │   └── pages/
-│   │       ├── Login.tsx
+│   │       ├── AllClusters.tsx   # All clusters page
+│   │       ├── ClusterDetail.tsx # OSD IOPS, workloads, degraded_reason
 │   │       ├── MyClusters.tsx
-│   │       ├── ClusterDetail.tsx  # Node panels, ODF capacity, OSD IOPS, pod swimlanes, PVCs, workloads
-│   │       ├── Deploy.tsx         # 179 job cards, filter chips, view toggle
+│   │       ├── Deploy.tsx
 │   │       └── Agents.tsx
-│   ├── nginx.conf           # Proxies /api to backend, SPA fallback
-│   ├── package.json
 │   └── Dockerfile
 ├── docker-compose.yml
 ├── .env.example
 └── .gitignore
 ```
+
+---
+
+## GitHub
+https://github.com/shyRozen/jenease

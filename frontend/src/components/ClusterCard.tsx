@@ -62,10 +62,10 @@ function ageStr(iso: string): string {
   return h > 0 ? `${h}h ${m % 60}m` : `${m}m`
 }
 
-function StatusBadge({ status, building, pausedAtTeardown, destroying, destroyFailed,
+function StatusBadge({ status, building, buildStage, destroying, destroyFailed,
   destroyStage, destroyBuildNum, destroyBuildUrl,
   stage, queueSince, pausedAt, degradedReason }: {
-  status: string; building: boolean; pausedAtTeardown: boolean
+  status: string; building: boolean; buildStage?: string | null
   destroying?: boolean; destroyFailed?: boolean
   destroyStage?: string | null; destroyBuildNum?: number; destroyBuildUrl?: string
   stage?: string | null; queueSince?: string | null
@@ -126,8 +126,10 @@ function StatusBadge({ status, building, pausedAtTeardown, destroying, destroyFa
       {status === 'DEGRADED' && degradedReason && (
         <span className="text-[10px] font-mono text-accent-amber">{degradedReason}</span>
       )}
-      {pausedAtTeardown && (
-        <span className="text-[10px] font-mono text-text-muted">paused · teardown</span>
+      {buildStage && (
+        <span className={`text-[10px] font-mono ${STAGE_COLORS[buildStage] ?? 'text-text-muted'}`}>
+          {buildStage === 'paused_input' && pausedAt ? `paused · ${pausedAt}` : buildStage}
+        </span>
       )}
     </div>
   )
@@ -175,12 +177,15 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
     retry: false,
   })
 
-  const pausedAtTeardown = stageData?.stage === 'paused_input' && stageData?.paused_at === 'teardown'
+  // Stages where the cluster is fully deployed and accessible (health query makes sense)
+  const LATE_STAGES = ['test', 'upgrade', 'rhcs', 'paused_input']
+  const isLateStage = LATE_STAGES.includes(stageData?.stage ?? '')
+  const buildStage = isLateStage ? stageData?.stage : null
 
   const { data: health, isLoading: healthLoading } = useQuery<HealthData>({
     queryKey: ['health', cluster.cluster_name],
     queryFn: () => api.get(`/clusters/${cluster.cluster_name}/health`),
-    enabled: (!cluster.building || pausedAtTeardown) && !cluster.destroying,
+    enabled: (!cluster.building || isLateStage) && !cluster.destroying,
     staleTime: 60_000,
     retry: false,
   })
@@ -220,7 +225,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
 
   const status = cluster.destroying ? 'DESTROYING'
     : cluster.destroy_failed ? 'DESTROY_FAILED'
-    : (cluster.building && !pausedAtTeardown) ? 'BUILDING'
+    : (cluster.building && !isLateStage) ? 'BUILDING'
     : health ? health.status : 'LOADING'
   const platform = cluster.credentials_conf
     ? cluster.credentials_conf.replace(/-VC\d+$/, '').replace(/-/g, ' ').trim()
@@ -251,8 +256,8 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
         </div>
         <StatusBadge
           status={status}
-          building={cluster.building && !pausedAtTeardown}
-          pausedAtTeardown={pausedAtTeardown}
+          building={cluster.building && !isLateStage}
+          buildStage={buildStage}
           destroying={cluster.destroying}
           destroyFailed={cluster.destroy_failed}
           destroyStage={destroyStageData?.stage}
@@ -274,7 +279,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
         liveNodes={health?.nodes}
         osdCount={health?.osd_count}
         osdSize={cluster.osd_size}
-        loading={(!cluster.building || pausedAtTeardown) && !cluster.destroying && healthLoading}
+        loading={(!cluster.building || isLateStage) && !cluster.destroying && healthLoading}
       />
 
       {/* ODF health */}
@@ -295,7 +300,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
       {/* Footer */}
       <div className="space-y-2">
         {/* Abort button — only while building and owner */}
-        {isOwner && cluster.building && !pausedAtTeardown && !cluster.destroying && (
+        {isOwner && cluster.building && stageData?.stage !== 'paused_input' && !cluster.destroying && (
           <div onClick={e => e.preventDefault()}>
             {abortState === 'done' ? (
               <p className="text-xs font-mono text-accent-amber">Abort sent — refreshing…</p>

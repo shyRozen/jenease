@@ -251,6 +251,8 @@ export default function WorkloadPanel({
   const [recordingId,    setRecordingId]    = useState<number | null>(null)
   const [recordingStart, setRecordingStart] = useState<number | null>(null)
   const [recordingElapsed, setRecordingElapsed] = useState(0)
+  const [recordingError,   setRecordingError]   = useState('')
+  const [startingRec,      setStartingRec]      = useState(false)
   const [replaySession,  setReplaySession]  = useState<SessionFull | null>(null)
   const [deploySession,  setDeploySession]  = useState<SessionSummary | null>(null)
   const [deployFull,     setDeployFull]     = useState<SessionFull | null>(null)
@@ -351,16 +353,26 @@ export default function WorkloadPanel({
   }
 
   async function startRecording() {
-    const res = await api.post<{ id: number; name: string }>('/sessions', { cluster_name: clusterName })
-    setRecordingId(res.id)
-    setRecordingStart(Date.now())
-    setRecordingElapsed(0)
-    refetchSessions()
+    setStartingRec(true)
+    setRecordingError('')
+    try {
+      const res = await api.post<{ id: number; name: string }>('/sessions', { cluster_name: clusterName })
+      setRecordingId(res.id)
+      setRecordingStart(Date.now())
+      setRecordingElapsed(0)
+      refetchSessions()
+    } catch (e: any) {
+      setRecordingError(e?.message ?? 'Failed to start recording')
+    } finally {
+      setStartingRec(false)
+    }
   }
 
   async function stopRecording() {
     if (!recordingId) return
-    await api.post(`/sessions/${recordingId}/stop`, {})
+    try {
+      await api.post(`/sessions/${recordingId}/stop`, {})
+    } catch { /* best-effort */ }
     setRecordingId(null)
     setRecordingStart(null)
     setRecordingElapsed(0)
@@ -585,10 +597,17 @@ export default function WorkloadPanel({
               </button>
             </div>
           ) : (
-            <button onClick={startRecording}
-              className="text-[10px] font-mono px-3 py-1 rounded border border-surface-4 text-text-primary hover:border-accent-red/50 hover:text-accent-red transition-colors">
-              ● Start Recording
-            </button>
+            <div className="space-y-1">
+              <button onClick={startRecording} disabled={startingRec}
+                className="text-[10px] font-mono px-3 py-1 rounded border border-surface-4 text-text-primary hover:border-accent-red/50 hover:text-accent-red transition-colors disabled:opacity-50 flex items-center gap-2">
+                {startingRec ? (
+                  <><span className="w-2.5 h-2.5 border border-text-muted border-t-text-primary rounded-full animate-spin" />Starting…</>
+                ) : '● Start Recording'}
+              </button>
+              {recordingError && (
+                <p className="text-[9px] font-mono text-accent-red">{recordingError}</p>
+              )}
+            </div>
           )}
         </div>
       )}

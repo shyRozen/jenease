@@ -35,7 +35,7 @@ function PrefetchManager({ username }: { username: string }) {
       // Step 2: stagger health prefetches across all clusters (100ms apart)
       // so we don't hammer the backend with 50+ simultaneous k8s connections
       clusters.forEach((c: any, i: number) => {
-        if (c.building) return
+        if (c.building || c.destroying || c.destroy_failed) return
         setTimeout(() => {
           queryClient.fetchQuery<{ status: string }>({
             queryKey: ['health', c.cluster_name],

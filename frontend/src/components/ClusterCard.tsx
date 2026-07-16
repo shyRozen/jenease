@@ -21,6 +21,10 @@ interface ClusterInfo {
   logs_url?: string
   kubeadmin_password?: string
   topology: { masters: number; workers: number }
+  destroying?: boolean
+  destroy_failed?: boolean
+  destroy_build_url?: string
+  destroy_build_num?: number
 }
 
 interface HealthData {
@@ -44,6 +48,13 @@ const STAGE_COLORS: Record<string, string> = {
   teardown:      'text-text-muted',
 }
 
+const DESTROY_STAGE_COLORS: Record<string, string> = {
+  init:           'text-text-muted',
+  cluster_destroy:'text-accent-red',
+  teardown:       'text-accent-red',
+  post_actions:   'text-text-muted',
+}
+
 function ageStr(iso: string): string {
   const ms = Date.now() - new Date(iso + (iso.includes('Z') ? '' : 'Z')).getTime()
   const m = Math.floor(ms / 60_000)
@@ -51,11 +62,40 @@ function ageStr(iso: string): string {
   return h > 0 ? `${h}h ${m % 60}m` : `${m}m`
 }
 
-function StatusBadge({ status, building, pausedAtTeardown, stage, queueSince, pausedAt, degradedReason }: {
+function StatusBadge({ status, building, pausedAtTeardown, destroying, destroyFailed,
+  destroyStage, destroyBuildNum, destroyBuildUrl,
+  stage, queueSince, pausedAt, degradedReason }: {
   status: string; building: boolean; pausedAtTeardown: boolean
+  destroying?: boolean; destroyFailed?: boolean
+  destroyStage?: string | null; destroyBuildNum?: number; destroyBuildUrl?: string
   stage?: string | null; queueSince?: string | null
   pausedAt?: string | null; degradedReason?: string | null
 }) {
+  if (destroying) return (
+    <div className="flex flex-col items-end gap-0.5">
+      <span className="flex items-center gap-1.5 text-xs font-mono text-accent-red">
+        <span className="w-2 h-2 rounded-full bg-accent-red animate-pulse" />DESTROYING
+      </span>
+      {destroyStage && (
+        <span className={`text-[10px] font-mono ${DESTROY_STAGE_COLORS[destroyStage] ?? 'text-accent-red'}`}>
+          {destroyStage}
+        </span>
+      )}
+    </div>
+  )
+  if (destroyFailed) return (
+    <div className="flex flex-col items-end gap-0.5">
+      <span className="flex items-center gap-1.5 text-xs font-mono text-accent-red">
+        <span className="w-2 h-2 rounded-full bg-accent-red" />DESTROY FAILED
+      </span>
+      {destroyBuildNum && destroyBuildUrl && (
+        <a href={destroyBuildUrl} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+          className="text-[10px] font-mono text-text-muted hover:text-accent-red transition-colors">
+          failed #{destroyBuildNum} ↗
+        </a>
+      )}
+    </div>
+  )
   if (building) return (
     <div className="flex flex-col items-end gap-0.5">
       <span className="flex items-center gap-1.5 text-xs font-mono text-accent-cyan">
@@ -120,7 +160,16 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
   const { data: stageData } = useQuery<{ stage: string | null; queue_since?: string; paused_at?: string }>({
     queryKey: ['stage', cluster.cluster_name],
     queryFn: () => api.get(`/clusters/${cluster.cluster_name}/stage`),
-    enabled: cluster.building,
+    enabled: cluster.building && !cluster.destroying,
+    staleTime: 25_000,
+    refetchInterval: 30_000,
+    retry: false,
+  })
+
+  const { data: destroyStageData } = useQuery<{ stage: string | null }>({
+    queryKey: ['destroy-stage', cluster.cluster_name],
+    queryFn: () => api.get(`/clusters/${cluster.cluster_name}/destroy-stage?build_num=${cluster.destroy_build_num}`),
+    enabled: !!cluster.destroying && !!cluster.destroy_build_num,
     staleTime: 25_000,
     refetchInterval: 30_000,
     retry: false,
@@ -131,7 +180,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
   const { data: health, isLoading: healthLoading } = useQuery<HealthData>({
     queryKey: ['health', cluster.cluster_name],
     queryFn: () => api.get(`/clusters/${cluster.cluster_name}/health`),
-    enabled: !cluster.building || pausedAtTeardown,
+    enabled: (!cluster.building || pausedAtTeardown) && !cluster.destroying,
     staleTime: 60_000,
     retry: false,
   })
@@ -169,7 +218,10 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
     }
   }
 
-  const status = (cluster.building && !pausedAtTeardown) ? 'BUILDING' : health ? health.status : 'LOADING'
+  const status = cluster.destroying ? 'DESTROYING'
+    : cluster.destroy_failed ? 'DESTROY_FAILED'
+    : (cluster.building && !pausedAtTeardown) ? 'BUILDING'
+    : health ? health.status : 'LOADING'
   const platform = cluster.credentials_conf
     ? cluster.credentials_conf.replace(/-VC\d+$/, '').replace(/-/g, ' ').trim()
     : ''
@@ -201,6 +253,11 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
           status={status}
           building={cluster.building && !pausedAtTeardown}
           pausedAtTeardown={pausedAtTeardown}
+          destroying={cluster.destroying}
+          destroyFailed={cluster.destroy_failed}
+          destroyStage={destroyStageData?.stage}
+          destroyBuildNum={cluster.destroy_build_num}
+          destroyBuildUrl={cluster.destroy_build_url}
           stage={stageData?.stage}
           queueSince={stageData?.queue_since}
           pausedAt={stageData?.paused_at}
@@ -217,7 +274,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
         liveNodes={health?.nodes}
         osdCount={health?.osd_count}
         osdSize={cluster.osd_size}
-        loading={(!cluster.building || pausedAtTeardown) && healthLoading}
+        loading={(!cluster.building || pausedAtTeardown) && !cluster.destroying && healthLoading}
       />
 
       {/* ODF health */}
@@ -238,7 +295,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
       {/* Footer */}
       <div className="space-y-2">
         {/* Abort button — only while building and owner */}
-        {isOwner && cluster.building && !pausedAtTeardown && (
+        {isOwner && cluster.building && !pausedAtTeardown && !cluster.destroying && (
           <div onClick={e => e.preventDefault()}>
             {abortState === 'done' ? (
               <p className="text-xs font-mono text-accent-amber">Abort sent — refreshing…</p>
@@ -280,7 +337,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
             className="text-xs font-mono text-text-secondary hover:text-accent-cyan transition-colors">
             Jenkins #{cluster.build_num} ↗
           </a>
-          {isOwner && (
+          {isOwner && !cluster.destroying && (
             <button
               onClick={e => { e.preventDefault(); setDestroyOpen(true) }}
               className="text-xs font-mono text-accent-red/30 hover:text-accent-red transition-colors"

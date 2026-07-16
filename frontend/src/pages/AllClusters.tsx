@@ -24,6 +24,10 @@ interface ClusterEntry {
   console_url?: string
   logs_url?: string
   kubeconfig_url?: string
+  destroying?: boolean
+  destroy_failed?: boolean
+  destroy_build_url?: string
+  destroy_build_num?: number
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -55,6 +59,8 @@ const PLATFORM_COLORS: Record<string, string> = {
 }
 
 function jenkinsStatus(c: ClusterEntry): string {
+  if (c.destroying) return 'Destroying'
+  if (c.destroy_failed) return 'Destroy Failed'
   if (c.building) return 'Building'
   if (c.result === 'FAILURE') return 'Failed'
   if (c.result === 'ABORTED') return 'Aborted'
@@ -62,14 +68,23 @@ function jenkinsStatus(c: ClusterEntry): string {
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  Building:      'text-accent-cyan',
-  HEALTHY:       'text-accent-green',
-  DEGRADED:      'text-accent-amber',
-  UNREACHABLE:   'text-text-muted',
-  Failed:        'text-accent-red',
-  Aborted:       'text-text-muted',
-  LOADING:       'text-text-muted',
-  Active:        'text-text-muted',
+  Building:        'text-accent-cyan',
+  Destroying:      'text-accent-red',
+  'Destroy Failed':'text-accent-red',
+  HEALTHY:         'text-accent-green',
+  DEGRADED:        'text-accent-amber',
+  UNREACHABLE:     'text-text-muted',
+  Failed:          'text-accent-red',
+  Aborted:         'text-text-muted',
+  LOADING:         'text-text-muted',
+  Active:          'text-text-muted',
+}
+
+const DESTROY_STAGE_COLORS: Record<string, string> = {
+  init:           'text-text-muted',
+  cluster_destroy:'text-accent-red',
+  teardown:       'text-accent-red',
+  post_actions:   'text-text-muted',
 }
 
 const STAGE_COLORS: Record<string, string> = {
@@ -140,7 +155,16 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
   const { data: stageData } = useQuery<{ stage: string | null; queue_since?: string; paused_at?: string }>({
     queryKey: ['stage', c.cluster_name],
     queryFn: () => api.get(`/clusters/${c.cluster_name}/stage`),
-    enabled: c.building,
+    enabled: c.building && !c.destroying,
+    staleTime: 25_000,
+    refetchInterval: 30_000,
+    retry: false,
+  })
+
+  const { data: destroyStageData } = useQuery<{ stage: string | null }>({
+    queryKey: ['destroy-stage', c.cluster_name],
+    queryFn: () => api.get(`/clusters/${c.cluster_name}/destroy-stage?build_num=${c.destroy_build_num}`),
+    enabled: !!c.destroying && !!c.destroy_build_num,
     staleTime: 25_000,
     refetchInterval: 30_000,
     retry: false,
@@ -151,7 +175,7 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
   const { data: health } = useQuery({
     queryKey: ['health', c.cluster_name],
     queryFn: () => api.get<{ status: string; degraded_reason?: string | null }>(`/clusters/${c.cluster_name}/health`),
-    enabled: !c.building || pausedAtTeardown,
+    enabled: (!c.building || pausedAtTeardown) && !c.destroying,
     staleTime: 30_000,
     retry: false,
   })
@@ -165,7 +189,9 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
     retry: false,
   })
 
-  const status = (c.building && !pausedAtTeardown) ? 'Building'
+  const status = c.destroying ? 'Destroying'
+    : c.destroy_failed ? 'Destroy Failed'
+    : (c.building && !pausedAtTeardown) ? 'Building'
     : health ? health.status
     : jenkinsStatus(c)
 
@@ -182,8 +208,11 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
           </span>
           {!isMe && <span className="text-[9px] font-mono text-text-muted shrink-0 w-16 truncate">{c.owner}</span>}
           <div className="flex flex-col shrink-0 w-32">
-            <span className={`text-[10px] font-mono ${STATUS_COLORS[status]}`}>
-              {c.building && !pausedAtTeardown && (
+            <span className={`text-[10px] font-mono ${STATUS_COLORS[status] ?? 'text-text-muted'}`}>
+              {c.destroying && (
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent-red animate-pulse mr-1" />
+              )}
+              {c.building && !pausedAtTeardown && !c.destroying && (
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent-cyan animate-pulse mr-1" />
               )}
               {status}
@@ -194,7 +223,18 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
             {pausedAtTeardown && (
               <span className="text-[9px] font-mono text-text-muted">paused · teardown</span>
             )}
-            {c.building && !pausedAtTeardown && stageData?.stage && (
+            {c.destroying && destroyStageData?.stage && (
+              <span className={`text-[9px] font-mono ${DESTROY_STAGE_COLORS[destroyStageData.stage] ?? 'text-accent-red'}`}>
+                {destroyStageData.stage}
+              </span>
+            )}
+            {c.destroy_failed && c.destroy_build_num && (
+              <a href={c.destroy_build_url} target="_blank" rel="noreferrer"
+                className="text-[9px] font-mono text-text-muted hover:text-accent-red transition-colors">
+                failed #{c.destroy_build_num} ↗
+              </a>
+            )}
+            {c.building && !pausedAtTeardown && !c.destroying && stageData?.stage && (
               <span className={`text-[9px] font-mono ${STAGE_COLORS[stageData.stage] ?? 'text-text-muted'}`}>
                 {stageData.stage === 'locker_queue' && stageData.queue_since
                   ? `locker_queue · ${ageStr(stageData.queue_since)}`

@@ -31,6 +31,13 @@ STAGE_SHORT: dict[str, str] = {
     "Declarative: Post Actions":        "teardown",
 }
 
+DESTROY_STAGE_SHORT: dict[str, str] = {
+    "Initialization":           "init",
+    "Cluster Destroy":          "cluster_destroy",
+    "teardown":                 "teardown",
+    "Declarative: Post Actions":"post_actions",
+}
+
 
 async def _fetch_locker_queue() -> dict[str, Optional[str]]:
     """Scrape the locker pending requests page.
@@ -96,14 +103,11 @@ async def active_clusters(session: dict = Depends(get_session)):
         jenkins.get_job_builds(DESTROY_JOB, limit=100),
     )
 
-    # Build a map of cluster_name → latest destroy timestamp.
-    # Include builds that are running OR succeeded — only exclude failed/aborted destroys
-    # (a failed destroy means the cluster might still be alive).
-    # For builds without a description yet, fetch CLUSTER_NAME from params.
+    # Classify destroy builds into three buckets:
+    # running → show DESTROYING badge; success → hide cluster; failed → show DESTROY FAILED badge.
     destroy_no_desc = [
         b for b in destroy_builds
-        if (b.get("building") or b.get("result") == "SUCCESS")
-        and not _cluster_name_from_desc(b.get("description", "") or "")
+        if not _cluster_name_from_desc(b.get("description", "") or "")
     ]
     if destroy_no_desc:
         destroy_param_names = await asyncio.gather(*[
@@ -115,16 +119,25 @@ async def active_clusters(session: dict = Depends(get_session)):
             if name:
                 build["_param_cluster_name"] = name
 
-    latest_destroy: dict[str, int] = {}
+    running_destroys:    dict[str, dict] = {}  # cluster → {build_num, build_url, timestamp}
+    successful_destroys: dict[str, int]  = {}  # cluster → timestamp
+    failed_destroys:     dict[str, dict] = {}  # cluster → {build_num, build_url, timestamp}
+
     for b in destroy_builds:
-        is_active = b.get("building") or b.get("result") == "SUCCESS"
-        if not is_active:
-            continue
         name = _cluster_name_from_desc(b.get("description", "") or "") or b.get("_param_cluster_name")
-        if name:
-            ts = b.get("timestamp", 0)
-            if ts > latest_destroy.get(name, 0):
-                latest_destroy[name] = ts
+        if not name:
+            continue
+        ts = b.get("timestamp", 0)
+        build_url = f"{settings.jenkins_url}/job/{DESTROY_JOB}/{b['number']}/"
+        if b.get("building"):
+            if ts > running_destroys.get(name, {}).get("timestamp", 0):
+                running_destroys[name] = {"build_num": b["number"], "build_url": build_url, "timestamp": ts}
+        elif b.get("result") == "SUCCESS":
+            if ts > successful_destroys.get(name, 0):
+                successful_destroys[name] = ts
+        elif b.get("result") in ("FAILURE", "ABORTED"):
+            if ts > failed_destroys.get(name, {}).get("timestamp", 0):
+                failed_destroys[name] = {"build_num": b["number"], "build_url": build_url, "timestamp": ts}
 
     # For actively building jobs with no description yet, fetch CLUSTER_NAME from params
     async def _get_cluster_name_from_params(build: dict) -> Optional[str]:
@@ -156,8 +169,8 @@ async def active_clusters(session: dict = Depends(get_session)):
         if not cluster_name.lower().startswith(username.lower()):
             continue
         deploy_ts = build.get("timestamp", 0)
-        # Skip if a destroy (running or successful) started after this deploy
-        if not build.get("building") and latest_destroy.get(cluster_name, 0) > deploy_ts:
+        # Skip only if a successful destroy started after this deploy
+        if not build.get("building") and successful_destroys.get(cluster_name, 0) > deploy_ts:
             continue
         # Keep the most recent deploy build per cluster
         if cluster_name not in seen or build["number"] > seen[cluster_name]["number"]:
@@ -169,13 +182,13 @@ async def active_clusters(session: dict = Depends(get_session)):
 
     # Fetch params for each active cluster in parallel (small N)
     async def enrich(info: dict) -> dict:
-        # If we already fetched params for a building-no-desc build, reuse them
         params = await _get_build_params_safe(jenkins, DEPLOY_JOB, info["number"])
-        cluster_name = info["cluster_name"]
+        cname = info["cluster_name"]
         platform_conf = params.get("FULL_PLATFORM_CONF") or params.get("CLUSTER_CONF") or ""
         masters, workers = _parse_topology(platform_conf)
-        return {
-            "cluster_name": info["cluster_name"],
+        deploy_ts = info.get("timestamp", 0)
+        result: dict = {
+            "cluster_name": cname,
             "build_num": info["number"],
             "build_url": f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{info['number']}/",
             "building": info.get("building", False),
@@ -194,6 +207,15 @@ async def active_clusters(session: dict = Depends(get_session)):
             "osd_size": params.get("OSD_SIZE", ""),
             "topology": {"masters": masters, "workers": workers},
         }
+        if cname in running_destroys and running_destroys[cname]["timestamp"] > deploy_ts:
+            result["destroying"] = True
+            result["destroy_build_url"] = running_destroys[cname]["build_url"]
+            result["destroy_build_num"] = running_destroys[cname]["build_num"]
+        elif cname in failed_destroys and failed_destroys[cname]["timestamp"] > deploy_ts:
+            result["destroy_failed"] = True
+            result["destroy_build_url"] = failed_destroys[cname]["build_url"]
+            result["destroy_build_num"] = failed_destroys[cname]["build_num"]
+        return result
 
     results = await asyncio.gather(*[enrich(info) for info in seen.values()])
     return sorted(results, key=lambda x: x.get("timestamp") or 0, reverse=True)
@@ -209,11 +231,10 @@ async def all_clusters(session: dict = Depends(get_session)):
         jenkins.get_job_builds(DESTROY_JOB, limit=100),
     )
 
-    # Destroy map (same logic as active_clusters)
+    # Classify destroy builds (same logic as active_clusters)
     destroy_no_desc = [
         b for b in destroy_builds
-        if (b.get("building") or b.get("result") == "SUCCESS")
-        and not _cluster_name_from_desc(b.get("description", "") or "")
+        if not _cluster_name_from_desc(b.get("description", "") or "")
     ]
     if destroy_no_desc:
         d_params = await asyncio.gather(*[
@@ -225,15 +246,25 @@ async def all_clusters(session: dict = Depends(get_session)):
             if name:
                 build["_param_cluster_name"] = name
 
-    latest_destroy: dict[str, int] = {}
+    running_destroys:    dict[str, dict] = {}
+    successful_destroys: dict[str, int]  = {}
+    failed_destroys:     dict[str, dict] = {}
+
     for b in destroy_builds:
-        if not (b.get("building") or b.get("result") == "SUCCESS"):
-            continue
         name = _cluster_name_from_desc(b.get("description", "") or "") or b.get("_param_cluster_name")
-        if name:
-            ts = b.get("timestamp", 0)
-            if ts > latest_destroy.get(name, 0):
-                latest_destroy[name] = ts
+        if not name:
+            continue
+        ts = b.get("timestamp", 0)
+        build_url = f"{settings.jenkins_url}/job/{DESTROY_JOB}/{b['number']}/"
+        if b.get("building"):
+            if ts > running_destroys.get(name, {}).get("timestamp", 0):
+                running_destroys[name] = {"build_num": b["number"], "build_url": build_url, "timestamp": ts}
+        elif b.get("result") == "SUCCESS":
+            if ts > successful_destroys.get(name, 0):
+                successful_destroys[name] = ts
+        elif b.get("result") in ("FAILURE", "ABORTED"):
+            if ts > failed_destroys.get(name, {}).get("timestamp", 0):
+                failed_destroys[name] = {"build_num": b["number"], "build_url": build_url, "timestamp": ts}
 
     # Enrich building builds with no description (all users)
     building_no_desc = [
@@ -258,7 +289,7 @@ async def all_clusters(session: dict = Depends(get_session)):
         if not cluster_name:
             continue
         deploy_ts = build.get("timestamp", 0)
-        if not build.get("building") and latest_destroy.get(cluster_name, 0) > deploy_ts:
+        if not build.get("building") and successful_destroys.get(cluster_name, 0) > deploy_ts:
             continue
         if cluster_name not in seen or build["number"] > seen[cluster_name]["number"]:
             parsed = JenkinsClient.parse_build_description(desc)
@@ -271,14 +302,14 @@ async def all_clusters(session: dict = Depends(get_session)):
 
     async def enrich_all(info: dict) -> dict:
         params = await _get_build_params_safe(jenkins, DEPLOY_JOB, info["number"])
-        cluster_name = info["cluster_name"]
+        cname = info["cluster_name"]
         platform_conf = params.get("FULL_PLATFORM_CONF") or params.get("CLUSTER_CONF") or ""
         masters, workers = _parse_topology(platform_conf)
-        # Derive owner from cluster name alphabetic prefix
-        m = _re.match(r'^([a-zA-Z]+)', cluster_name)
-        owner = m.group(1) if m else cluster_name
-        return {
-            "cluster_name": cluster_name,
+        m = _re.match(r'^([a-zA-Z]+)', cname)
+        owner = m.group(1) if m else cname
+        deploy_ts = info.get("timestamp", 0)
+        result: dict = {
+            "cluster_name": cname,
             "owner": owner,
             "build_num": info["number"],
             "build_url": f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{info['number']}/",
@@ -296,6 +327,15 @@ async def all_clusters(session: dict = Depends(get_session)):
             "osd_size": params.get("OSD_SIZE", ""),
             "topology": {"masters": masters, "workers": workers},
         }
+        if cname in running_destroys and running_destroys[cname]["timestamp"] > deploy_ts:
+            result["destroying"] = True
+            result["destroy_build_url"] = running_destroys[cname]["build_url"]
+            result["destroy_build_num"] = running_destroys[cname]["build_num"]
+        elif cname in failed_destroys and failed_destroys[cname]["timestamp"] > deploy_ts:
+            result["destroy_failed"] = True
+            result["destroy_build_url"] = failed_destroys[cname]["build_url"]
+            result["destroy_build_num"] = failed_destroys[cname]["build_num"]
+        return result
 
     results = await asyncio.gather(*[enrich_all(info) for info in seen.values()])
     return sorted(results, key=lambda x: x.get("timestamp") or 0, reverse=True)
@@ -486,6 +526,36 @@ async def cluster_stage(cluster_name: str, session: dict = Depends(get_session))
     if queue_since:
         result["queue_since"] = queue_since
     return result
+
+
+@router.get("/{cluster_name}/destroy-stage")
+async def cluster_destroy_stage(cluster_name: str, build_num: int, session: dict = Depends(get_session)):
+    """Current Jenkins pipeline stage for a running destroy job."""
+    try:
+        async with httpx.AsyncClient(timeout=10, verify=False) as c:
+            r = await c.get(
+                f"{settings.jenkins_url}/job/{DESTROY_JOB}/{build_num}/wfapi/describe",
+                auth=(session["username"], session["token"]),
+            )
+            wf = r.json()
+    except Exception:
+        return {"stage": None}
+
+    current: Optional[str] = None
+    for s in wf.get("stages", []):
+        if s.get("status") == "IN_PROGRESS":
+            current = s["name"]
+            break
+    if not current:
+        for s in reversed(wf.get("stages", [])):
+            if s.get("status") == "SUCCESS":
+                current = s["name"]
+                break
+
+    if not current:
+        return {"stage": None}
+
+    return {"stage": DESTROY_STAGE_SHORT.get(current, current.lower().replace(" ", "_"))}
 
 
 @router.get("/{cluster_name}/kubeconfig")

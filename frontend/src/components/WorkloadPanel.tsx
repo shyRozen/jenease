@@ -2,6 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import ThroughputChart, { type DataPoint, SERIES } from './ThroughputChart'
+import SessionReplayModal, { type SessionFull, type SessionEvent } from './SessionReplayModal'
+
+interface SessionSummary {
+  id: number; name: string; cluster_name: string; username: string
+  status: string; started_at: string; ended_at: string | null
+  event_count: number; duration_ms: number
+}
 
 interface WorkloadEntry {
   id: number
@@ -240,6 +247,25 @@ export default function WorkloadPanel({
   const ratesRef    = useRef<Record<number, number>>({})
   const workloadsRef = useRef<WorkloadEntry[]>([])
 
+  // Recording state
+  const [recordingId,    setRecordingId]    = useState<number | null>(null)
+  const [recordingStart, setRecordingStart] = useState<number | null>(null)
+  const [recordingElapsed, setRecordingElapsed] = useState(0)
+  const [replaySession,  setReplaySession]  = useState<SessionFull | null>(null)
+  const [deploySession,  setDeploySession]  = useState<SessionSummary | null>(null)
+  const [deployFull,     setDeployFull]     = useState<SessionFull | null>(null)
+  const [deploying,      setDeploying]      = useState(false)
+  const [renamingId,     setRenamingId]     = useState<number | null>(null)
+  const [renameValue,    setRenameValue]    = useState('')
+  const recordingIdRef = useRef<number | null>(null)
+  recordingIdRef.current = recordingId
+
+  const { data: sessions = [], refetch: refetchSessions } = useQuery<SessionSummary[]>({
+    queryKey: ['sessions'],
+    queryFn: () => api.get('/sessions'),
+    staleTime: 30_000,
+  })
+
   function handleRateUpdate(id: number, rateMb: number | null) {
     setRates(prev => {
       const next = { ...prev }
@@ -250,7 +276,7 @@ export default function WorkloadPanel({
     })
   }
 
-  // Sample per-type and total MB/s every second
+  // Sample per-type and total MB/s every second; push to recording if active
   useEffect(() => {
     const id = setInterval(() => {
       const byType: Record<string, number> = { rbd: 0, cephfs: 0, noobaa: 0 }
@@ -259,13 +285,28 @@ export default function WorkloadPanel({
         byType[w.workload_type] = (byType[w.workload_type] ?? 0) + r
       }
       const total = Object.values(byType).reduce((a, b) => a + b, 0)
+      const now = Date.now()
       setHistory(prev => [...prev.slice(-600), {
-        ts: Date.now(), total,
+        ts: now, total,
         rbd: byType.rbd, cephfs: byType.cephfs, noobaa: byType.noobaa,
       }])
+
+      // Push throughput sample to active recording
+      const sid = recordingIdRef.current
+      if (sid && recordingStart !== null) {
+        setRecordingElapsed(e => e + 1)
+        const offset_ms = now - recordingStart
+        api.post(`/sessions/${sid}/throughput`, [{
+          offset_ms,
+          rbd: byType.rbd,
+          cephfs: byType.cephfs,
+          noobaa: byType.noobaa,
+          total,
+        }]).catch(() => {})
+      }
     }, 1000)
     return () => clearInterval(id)
-  }, [])
+  }, [recordingStart])
 
   const { data: workloads = [], refetch } = useQuery<WorkloadEntry[]>({
     queryKey: ['workloads', clusterName],
@@ -299,6 +340,7 @@ export default function WorkloadPanel({
         duration_sec: duration,
         obj_size_mb: objSizeMb,
         workers,
+        session_id: recordingId,
       })
       await refetch()
     } catch (e: any) {
@@ -306,6 +348,84 @@ export default function WorkloadPanel({
     } finally {
       setLaunching(false)
     }
+  }
+
+  async function startRecording() {
+    const res = await api.post<{ id: number; name: string }>('/sessions', { cluster_name: clusterName })
+    setRecordingId(res.id)
+    setRecordingStart(Date.now())
+    setRecordingElapsed(0)
+    refetchSessions()
+  }
+
+  async function stopRecording() {
+    if (!recordingId) return
+    await api.post(`/sessions/${recordingId}/stop`, {})
+    setRecordingId(null)
+    setRecordingStart(null)
+    setRecordingElapsed(0)
+    refetchSessions()
+  }
+
+  async function openDeploy(s: SessionSummary) {
+    const full = await api.get<SessionFull>(`/sessions/${s.id}`)
+    setDeploySession(s)
+    setDeployFull(full)
+  }
+
+  async function openReplay(s: SessionSummary) {
+    const full = await api.get<SessionFull>(`/sessions/${s.id}`)
+    setReplaySession(full)
+  }
+
+  async function execDeploy() {
+    if (!deployFull) return
+    setDeploying(true)
+    const events = [...deployFull.events].sort((a, b) => a.offset_ms - b.offset_ms)
+    for (const e of events) {
+      const delay = e.offset_ms
+      setTimeout(() => {
+        api.post(`/clusters/${clusterName}/workloads`, {
+          workload_type: e.workload_type,
+          size_gb: e.size_gb,
+          mode: e.mode,
+          pattern: e.pattern,
+          block_size: e.block_size,
+          num_jobs: e.num_jobs,
+          iodepth: e.iodepth,
+          duration_sec: e.duration_sec,
+          obj_size_mb: e.obj_size_mb,
+          workers: e.workers,
+          session_id: null,
+        }).then(() => refetch()).catch(() => {})
+      }, delay)
+    }
+    setDeploying(false)
+    setDeploySession(null)
+    setDeployFull(null)
+  }
+
+  async function deleteSession(id: number) {
+    await api.delete(`/sessions/${id}`)
+    refetchSessions()
+  }
+
+  async function saveRename(id: number) {
+    if (renameValue.trim()) {
+      await api.patch(`/sessions/${id}`, { name: renameValue.trim() })
+      refetchSessions()
+    }
+    setRenamingId(null)
+    setRenameValue('')
+  }
+
+  function fmtElapsed(s: number) {
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+  }
+
+  function fmtDuration(ms: number) {
+    const s = Math.floor(ms / 1000)
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
   }
 
   function Btn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
@@ -324,6 +444,7 @@ export default function WorkloadPanel({
   }
 
   return (
+    <>
     <div className="flex flex-col gap-3 min-w-0">
       {showLauncher && <p className="text-[9px] font-mono text-text-muted uppercase tracking-widest">Workloads</p>}
 
@@ -448,6 +569,119 @@ export default function WorkloadPanel({
         </button>
       </div>}
 
+      {/* ── Recording section ── */}
+      {showLauncher && (
+        <div className="border border-surface-4 rounded-lg p-3 space-y-2 bg-surface-2/30">
+          <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Recording</p>
+          {recordingId ? (
+            <div className="flex items-center gap-3">
+              <span className="flex items-center gap-1.5 text-[10px] font-mono text-accent-red">
+                <span className="w-2 h-2 rounded-full bg-accent-red animate-pulse" />
+                REC {fmtElapsed(recordingElapsed)}
+              </span>
+              <button onClick={stopRecording}
+                className="text-[10px] font-mono px-2 py-0.5 rounded border border-accent-red/40 text-accent-red hover:bg-accent-red/10 transition-colors">
+                ■ Stop
+              </button>
+            </div>
+          ) : (
+            <button onClick={startRecording}
+              className="text-[10px] font-mono px-3 py-1 rounded border border-surface-4 text-text-primary hover:border-accent-red/50 hover:text-accent-red transition-colors">
+              ● Start Recording
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* ── Session list ── */}
+      {showLauncher && sessions.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Sessions</p>
+          {sessions.slice(0, 8).map(s => (
+            <div key={s.id} className="border border-surface-4 rounded-lg p-2.5 bg-surface-2/20 space-y-1.5">
+              {/* Name row */}
+              <div className="flex items-start justify-between gap-2">
+                {renamingId === s.id ? (
+                  <input
+                    autoFocus
+                    value={renameValue}
+                    onChange={e => setRenameValue(e.target.value)}
+                    onBlur={() => saveRename(s.id)}
+                    onKeyDown={e => { if (e.key === 'Enter') saveRename(s.id); if (e.key === 'Escape') { setRenamingId(null); setRenameValue('') } }}
+                    className="flex-1 text-[10px] font-mono bg-surface-3 border border-accent-cyan/40 rounded px-1.5 py-0.5 text-text-primary outline-none"
+                  />
+                ) : (
+                  <span className="text-[10px] font-mono text-text-primary truncate flex-1">{s.name}</span>
+                )}
+                <div className="flex items-center gap-1 shrink-0">
+                  {s.status === 'recording' && (
+                    <span className="text-[8px] font-mono text-accent-red flex items-center gap-0.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-accent-red animate-pulse" />REC
+                    </span>
+                  )}
+                  <button onClick={() => { setRenamingId(s.id); setRenameValue(s.name) }}
+                    title="Rename"
+                    className="text-[9px] text-text-muted hover:text-text-primary transition-colors">✏</button>
+                  <button onClick={() => deleteSession(s.id)}
+                    title="Delete"
+                    className="text-[9px] text-text-muted hover:text-accent-red transition-colors">✕</button>
+                </div>
+              </div>
+
+              {/* Meta */}
+              <p className="text-[9px] font-mono text-text-muted">
+                {s.cluster_name} · {s.event_count} workload{s.event_count !== 1 ? 's' : ''}
+                {s.duration_ms > 0 ? ` · ${fmtDuration(s.duration_ms)}` : ''}
+              </p>
+
+              {/* Actions */}
+              {s.status === 'stopped' && (
+                <div className="flex gap-1.5">
+                  <button onClick={() => openReplay(s)}
+                    className="text-[9px] font-mono px-2 py-0.5 rounded border border-surface-4 text-text-primary hover:border-accent-cyan/50 hover:text-accent-cyan transition-colors">
+                    ▶ Graph
+                  </button>
+                  {s.event_count > 0 && (
+                    <button onClick={() => openDeploy(s)}
+                      className="text-[9px] font-mono px-2 py-0.5 rounded border border-surface-4 text-text-primary hover:border-accent-green/50 hover:text-accent-green transition-colors">
+                      ↗ Deploy
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Deploy summary panel (inline) */}
+              {deploySession?.id === s.id && deployFull && (
+                <div className="border border-accent-green/30 rounded p-2 space-y-2 bg-surface-3/50">
+                  <p className="text-[9px] font-mono text-accent-green uppercase tracking-wider">Deploy to: {clusterName}</p>
+                  <div className="space-y-0.5">
+                    {deployFull.events.map((e: SessionEvent, i: number) => (
+                      <p key={i} className="text-[9px] font-mono text-text-secondary">
+                        +{(e.offset_ms / 1000).toFixed(0)}s · {e.workload_type.toUpperCase()} · {e.size_gb}GB · {e.mode}
+                        {e.workload_type !== 'noobaa' ? ` · bs=${e.block_size} j=${e.num_jobs}` : ` · ${e.obj_size_mb}MB obj`}
+                      </p>
+                    ))}
+                  </div>
+                  <p className="text-[9px] font-mono text-text-muted">
+                    Total duration: {fmtDuration(deployFull.duration_ms)}
+                  </p>
+                  <div className="flex gap-2">
+                    <button onClick={() => { setDeploySession(null); setDeployFull(null) }}
+                      className="text-[9px] font-mono px-2 py-0.5 rounded border border-surface-4 text-text-muted hover:text-text-primary transition-colors">
+                      Cancel
+                    </button>
+                    <button onClick={execDeploy} disabled={deploying}
+                      className="text-[9px] font-mono px-2 py-0.5 rounded border border-accent-green/40 text-accent-green hover:bg-accent-green/10 transition-colors disabled:opacity-50">
+                      {deploying ? 'Launching…' : '↗ Confirm Deploy'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Active workloads */}
       {showList && (
         <ThroughputChart data={history} />
@@ -514,5 +748,11 @@ export default function WorkloadPanel({
         </button>
       )}
     </div>
+
+    {/* Session replay modal — renders outside the panel div so it overlays everything */}
+    {replaySession && (
+      <SessionReplayModal session={replaySession} onClose={() => setReplaySession(null)} />
+    )}
+    </>
   )
 }

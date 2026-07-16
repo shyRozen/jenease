@@ -12,7 +12,8 @@ from sse_starlette.sse import EventSourceResponse
 from auth import get_session
 from database import engine
 from jenkins import JenkinsClient
-from models import Workload
+from datetime import datetime
+from models import Workload, WorkloadSession
 from workload_runner import (
     create_workload,
     delete_workload_namespace,
@@ -62,6 +63,8 @@ class CreateWorkloadRequest(BaseModel):
     # NooBaa options
     obj_size_mb: int = 64       # 1 | 16 | 64 | 256
     workers: int = 8            # 1 | 4 | 8 | 16 | 32
+    # Recording
+    session_id: Optional[int] = None
 
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
@@ -124,6 +127,33 @@ async def create(
         db.commit()
         db.refresh(workload)
         wid = workload.id
+
+    # Record event in active session (fail silently)
+    if body.session_id:
+        try:
+            with Session(engine) as db:
+                ws = db.get(WorkloadSession, body.session_id)
+                if ws and ws.status == "recording":
+                    offset_ms = int((datetime.utcnow() - ws.started_at).total_seconds() * 1000)
+                    events = json.loads(ws.events)
+                    events.append({
+                        "offset_ms": offset_ms,
+                        "workload_type": body.workload_type,
+                        "size_gb": body.size_gb,
+                        "mode": body.mode,
+                        "pattern": body.pattern,
+                        "block_size": body.block_size,
+                        "num_jobs": body.num_jobs,
+                        "iodepth": body.iodepth,
+                        "duration_sec": body.duration_sec,
+                        "obj_size_mb": body.obj_size_mb,
+                        "workers": body.workers,
+                    })
+                    ws.events = json.dumps(events)
+                    db.add(ws)
+                    db.commit()
+        except Exception:
+            pass
 
     return {"id": wid, "namespace": namespace, "pod_name": pod_name}
 

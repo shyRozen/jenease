@@ -16,6 +16,7 @@ from routers import names as names_router
 from routers import jobs as jobs_router
 from routers import workloads as workloads_router
 from routers import rlocker as rlocker_router
+from routers import sessions as sessions_router
 from routers.jobs import _build_catalog, _catalog, _catalog_ts
 import routers.jobs as jobs_module
 
@@ -71,6 +72,7 @@ app.include_router(names_router.router)
 app.include_router(jobs_router.router)
 app.include_router(workloads_router.router)
 app.include_router(rlocker_router.router)
+app.include_router(sessions_router.router)
 
 
 @app.get("/api/health")

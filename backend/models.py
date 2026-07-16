@@ -21,6 +21,18 @@ class Workload(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class WorkloadSession(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    cluster_name: str              # where recorded (informational)
+    username: str
+    status: str = "recording"      # "recording" | "stopped"
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    ended_at: Optional[datetime] = None
+    events: str = "[]"             # JSON: [{offset_ms, workload_type, params...}]
+    throughput: str = "[]"         # JSON: [{offset_ms, rbd, cephfs, noobaa, total}]
+
+
 class Preset(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(index=True)

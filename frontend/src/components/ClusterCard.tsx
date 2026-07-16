@@ -337,6 +337,13 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
             className="text-xs font-mono text-text-secondary hover:text-accent-cyan transition-colors">
             Jenkins #{cluster.build_num} ↗
           </a>
+          {(cluster.destroying || cluster.destroy_failed) && cluster.destroy_build_url && (
+            <a href={cluster.destroy_build_url} target="_blank" rel="noreferrer"
+              onClick={e => e.stopPropagation()}
+              className="text-xs font-mono text-accent-red hover:brightness-125 transition-colors">
+              Destroy #{cluster.destroy_build_num} ↗
+            </a>
+          )}
           {isOwner && !cluster.destroying && (
             <button
               onClick={e => { e.preventDefault(); setDestroyOpen(true) }}

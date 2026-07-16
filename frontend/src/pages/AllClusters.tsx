@@ -270,6 +270,12 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
             className="text-[10px] font-mono text-text-muted hover:text-accent-cyan transition-colors">
             Jenkins #{c.build_num}↗
           </a>
+          {(c.destroying || c.destroy_failed) && c.destroy_build_url && (
+            <a href={c.destroy_build_url} target="_blank" rel="noreferrer"
+              className="text-[10px] font-mono text-accent-red hover:brightness-125 transition-colors">
+              Destroy #{c.destroy_build_num}↗
+            </a>
+          )}
           {c.kubeconfig_url && (
             <a
               href={`/api/clusters/${c.cluster_name}/kubeconfig`}

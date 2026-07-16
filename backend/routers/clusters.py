@@ -363,6 +363,22 @@ async def cluster_stage(cluster_name: str, session: dict = Depends(get_session))
 
     # Find the building build for this cluster
     builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+
+    # For building builds with no description yet, fetch CLUSTER_NAME from params
+    no_desc = [
+        b for b in builds
+        if b.get("building") and not _cluster_name_from_desc(b.get("description", "") or "")
+    ]
+    if no_desc:
+        param_results = await asyncio.gather(*[
+            _get_build_params_safe(jenkins, DEPLOY_JOB, b["number"])
+            for b in no_desc
+        ])
+        for build, params in zip(no_desc, param_results):
+            name = params.get("CLUSTER_NAME", "")
+            if name:
+                build["_param_cluster_name"] = name
+
     build_num: Optional[int] = None
     build_url: Optional[str] = None
     for b in builds:

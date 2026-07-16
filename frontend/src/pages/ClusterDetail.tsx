@@ -430,10 +430,12 @@ export default function ClusterDetail() {
                     iops={health.osd_iops}
                   />
                 ) : null}
-                <WorkloadPanel clusterName={name!} showLauncher={false} />
+                {/* Single panel for owners (launcher + list share ratesRef for recording) */}
+                {isOwner
+                  ? <WorkloadPanel clusterName={name!} />
+                  : <WorkloadPanel clusterName={name!} showLauncher={false} />
+                }
               </div>
-              {/* Right: launcher form — only for cluster owner */}
-              {isOwner && <WorkloadPanel clusterName={name!} showList={false} />}
             </div>
           </div>
         </section>

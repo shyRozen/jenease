@@ -320,6 +320,7 @@ async def stream_logs(
         size_bytes = workload.size_gb * 1024 * 1024 * 1024
 
     async def generate():
+        yield {"data": json.dumps({"line": "[jenease] Connecting to cluster…"})}
         async for line in stream_pod_logs(kubeconfig_url, namespace, pod_name):
             parsed = parse_fio_line(line, size_bytes=size_bytes)
             yield {"data": json.dumps(parsed)}

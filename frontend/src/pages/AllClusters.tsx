@@ -174,6 +174,16 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
   const isLateStage = LATE_STAGES.includes(stageData?.stage ?? '')
   const buildStage = isLateStage ? stageData?.stage : null
 
+  const { data: rlockerResources } = useQuery<{ name: string; sign_off: string | null; status: string; duration: string | null }[]>({
+    queryKey: ['rlocker-resources'],
+    queryFn: () => api.get('/rlocker/resources'),
+    staleTime: 120_000,
+    retry: false,
+  })
+  const lockerEntry = rlockerResources?.find(
+    r => r.sign_off?.toLowerCase() === c.cluster_name.toLowerCase()
+  )
+
   const { data: health } = useQuery({
     queryKey: ['health', c.cluster_name],
     queryFn: () => api.get<{ status: string; degraded_reason?: string | null }>(`/clusters/${c.cluster_name}/health`),
@@ -253,6 +263,11 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
           </span>
           <span className="text-[10px] font-mono text-text-muted shrink-0">OCP {c.ocp_version || '—'}</span>
           <span className="text-[10px] font-mono text-text-muted shrink-0">OCS {c.ocs_version || '—'}</span>
+          {lockerEntry?.status === 'LOCKED' && (
+            <span className="text-[9px] font-mono text-yellow-700 dark:text-yellow-600 shrink-0 truncate max-w-[140px]">
+              🔒 {lockerEntry.name}{lockerEntry.duration ? ` · ${lockerEntry.duration}` : ''}
+            </span>
+          )}
           <span className="text-[10px] font-mono text-text-muted shrink-0">{c.topology.masters}M+{c.topology.workers}W</span>
           <span className="text-[10px] font-mono text-text-muted ml-auto shrink-0">{age(c.timestamp)}</span>
         </Link>

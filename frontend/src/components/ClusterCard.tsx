@@ -204,6 +204,17 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
     gcTime: 300_000,
   })
 
+  // RLocker: shared across all cards via TanStack cache (single HTTP request per 2 min)
+  const { data: rlockerResources } = useQuery<{ name: string; sign_off: string | null; status: string; duration: string | null }[]>({
+    queryKey: ['rlocker-resources'],
+    queryFn: () => api.get('/rlocker/resources'),
+    staleTime: 120_000,
+    retry: false,
+  })
+  const lockerEntry = rlockerResources?.find(
+    r => r.sign_off?.toLowerCase() === cluster.cluster_name.toLowerCase()
+  )
+
   const queryClient = useQueryClient()
   const [abortState, setAbortState] = useState<'idle' | 'confirm' | 'aborting' | 'done'>('idle')
   const [destroyOpen, setDestroyOpen] = useState(false)
@@ -271,6 +282,13 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
       </div>
 
       {platform && <p className="text-xs font-mono text-text-secondary truncate">{platform}</p>}
+
+      {/* Resource locker status */}
+      {lockerEntry?.status === 'LOCKED' && (
+        <p className="text-[10px] font-mono text-yellow-700 dark:text-yellow-600 truncate">
+          🔒 {lockerEntry.name}{lockerEntry.duration ? ` · ${lockerEntry.duration}` : ''}
+        </p>
+      )}
 
       {/* Node diagram */}
       <NodeDiagram

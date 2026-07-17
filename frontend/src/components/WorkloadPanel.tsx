@@ -492,7 +492,9 @@ export default function WorkloadPanel({
     for (const item of [...seqItems].sort((a, b) => a.offset_sec - b.offset_sec)) {
       const delay = item.offset_sec * 1000 - (Date.now() - t0)
       await new Promise(r => setTimeout(r, Math.max(0, delay)))
-      api.post(`/clusters/${clusterName}/workloads`, { ...item, session_id: sessionId }).then(() => refetch()).catch(() => {})
+      api.post(`/clusters/${clusterName}/workloads`, { ...item, session_id: sessionId })
+        .then(() => refetch())
+        .catch((e: any) => console.error(`[sequence] ${item.workload_type} failed:`, e?.message))
     }
     setSeqRunning(false)
   }

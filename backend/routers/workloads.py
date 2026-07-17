@@ -88,10 +88,11 @@ async def create(
         raise HTTPException(404, "Kubeconfig not found for this cluster")
 
     # Generate unique IDs
-    wl_id_tmp = int(time.time() * 1000) % 1_000_000
-    namespace = f"jenease-wl-{wl_id_tmp}"
-    pvc_name  = f"wl-pvc-{wl_id_tmp}"
-    pod_name  = f"wl-pod-{wl_id_tmp}"
+    import uuid as _uuid
+    wl_uid = _uuid.uuid4().hex[:8]   # 8-char hex — unique even for concurrent launches
+    namespace = f"jenease-wl-{wl_uid}"
+    pvc_name  = f"wl-pvc-{wl_uid}"
+    pod_name  = f"wl-pod-{wl_uid}"
 
     try:
         await create_workload(

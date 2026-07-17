@@ -8,10 +8,15 @@ Fallback: download kubeconfig from magna002 (works when running on company LAN).
 """
 import asyncio
 import re
+import time
 from typing import Optional
 
 import httpx
 import yaml
+
+# Cache OAuth tokens per api_url — tokens last ~1h, cache for 55 min
+_token_cache: dict[str, tuple[str, float]] = {}  # api_url → (token, expires_at)
+_TOKEN_TTL = 3300  # 55 minutes
 
 
 def _extract_cluster_domain(console_url: str) -> Optional[str]:
@@ -21,7 +26,12 @@ def _extract_cluster_domain(console_url: str) -> Optional[str]:
 
 
 async def _get_oauth_token(api_url: str, password: str, proxy_url: Optional[str] = None) -> Optional[str]:
-    """Get a Bearer token via OCP OAuth using kubeadmin credentials."""
+    """Get a Bearer token via OCP OAuth using kubeadmin credentials. Cached for 55 min."""
+    cache_key = f"{api_url}:{password[:8]}"
+    cached = _token_cache.get(cache_key)
+    if cached and time.time() < cached[1]:
+        return cached[0]
+
     oauth_url = api_url.replace('api.', 'oauth-openshift.apps.', 1).replace(':6443', '')
     authorize_url = f"{oauth_url}/oauth/authorize"
     params = {
@@ -43,7 +53,9 @@ async def _get_oauth_token(api_url: str, password: str, proxy_url: Optional[str]
             location = r.headers.get('location', '')
             m = re.search(r'access_token=([^&]+)', location)
             if m:
-                return m.group(1)
+                token = m.group(1)
+                _token_cache[cache_key] = (token, time.time() + _TOKEN_TTL)
+                return token
         except Exception:
             pass
     return None
@@ -60,8 +72,8 @@ def _query_osd_iops(api_url: str, token: str, proxy_url: Optional[str] = None) -
     osd_iops: dict = {}
     try:
         for op, metric in [('r', 'ceph_osd_op_r'), ('w', 'ceph_osd_op_w')]:
-            query = _up.quote(f'irate({metric}[15s])')
-            with httpx.Client(verify=False, proxy=proxy_url, timeout=5) as c:
+            query = _up.quote(f'rate({metric}[30s])')
+            with httpx.Client(verify=False, proxy=proxy_url, timeout=10) as c:
                 r = c.get(f"{thanos}?query={query}", headers=headers)
                 data = r.json()
             for item in data.get('data', {}).get('result', []):

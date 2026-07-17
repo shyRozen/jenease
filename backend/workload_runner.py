@@ -288,14 +288,28 @@ def _sync_create_io_workload(
 
     time_flags = f"--time_based --runtime={duration_sec}" if duration_sec > 0 else ""
     direct_flag = "--direct=1" if direct else ""
-    cmd = (
-        f"echo '[jenease] Starting fio ({fio_rw}, bs={block_size}, {num_jobs} jobs × {duration_desc}, iodepth={iodepth}, engine={engine})...' && "
-        f"{prefill}"
+
+    fio_cmd = (
         f"fio --name=jenease --ioengine={engine} {direct_flag} "
         f"--bs={block_size} --numjobs={num_jobs} --iodepth={iodepth} --rw={fio_rw} "
         f"--size={per_job_gb}g {time_flags} "
         f"--filename=/data/testfile --fallocate=none "
-        f"--status-interval=2 --group_reporting 2>&1 && "
+        f"--status-interval=2 --group_reporting"
+    ).strip()
+
+    # With --direct=1, fio runs in non-TTY (pipe) mode and buffers stdout in 8KB chunks.
+    # Status-interval lines accumulate in the buffer and only flush on job exit.
+    # Wrapping in `script -q -c '...' /dev/null` forces a pseudo-TTY so fio uses
+    # line-buffered output and compact status format ([w=...MiB/s]) visible in real-time.
+    if direct_flag:
+        wrapped_fio = f"script -q -c '{fio_cmd}' /dev/null 2>&1"
+    else:
+        wrapped_fio = f"{fio_cmd} 2>&1"
+
+    cmd = (
+        f"echo '[jenease] Starting fio ({fio_rw}, bs={block_size}, {num_jobs} jobs × {duration_desc}, iodepth={iodepth}, engine={engine})...' && "
+        f"{prefill}"
+        f"{wrapped_fio} && "
         f"echo '[jenease] Workload complete.'"
     )
 

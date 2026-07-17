@@ -25,7 +25,8 @@ function niceMax(v: number) {
   return Math.ceil(v / mag) * mag
 }
 
-export default function ThroughputChart({ data }: { data: DataPoint[] }) {
+export default function ThroughputChart({ data, visibleSecs }: { data: DataPoint[]; visibleSecs?: number }) {
+  const VISIBLE = visibleSecs ?? VISIBLE_SECS
   const containerRef = useRef<HTMLDivElement>(null)
   const [width, setWidth]       = useState(400)
   const [offset, setOffset]     = useState(0) // seconds from right (0 = live)
@@ -54,7 +55,7 @@ export default function ThroughputChart({ data }: { data: DataPoint[] }) {
 
   const nowMs   = data.length > 0 ? data[data.length - 1].ts : Date.now()
   const endMs   = nowMs - offset * 1000
-  const startMs = endMs - VISIBLE_SECS * 1000
+  const startMs = endMs - VISIBLE * 1000
 
   const visible = data.filter(d => d.ts >= startMs - 2000 && d.ts <= endMs + 2000)
   const maxVal  = niceMax(Math.max(...data.slice(-300).map(d => d.total), 1))
@@ -65,7 +66,7 @@ export default function ThroughputChart({ data }: { data: DataPoint[] }) {
   }
 
   function tsToX(ts: number) {
-    return PAD.left + ((ts - startMs) / (VISIBLE_SECS * 1000)) * W
+    return PAD.left + ((ts - startMs) / (VISIBLE * 1000)) * W
   }
   function valToY(v: number) {
     return PAD.top + H - (v / maxVal) * H
@@ -99,7 +100,7 @@ export default function ThroughputChart({ data }: { data: DataPoint[] }) {
   function onPointerMove(e: React.PointerEvent) {
     if (!isDragging.current) return
     const dx = e.clientX - dragStartX.current   // positive = drag right = show past
-    const secsMoved = (dx / W) * VISIBLE_SECS
+    const secsMoved = (dx / W) * VISIBLE
     const maxPast = Math.max(0, (data.length - 1))
     const newOffset = Math.max(0, Math.min(dragStartOffset.current + secsMoved, maxPast))
     autoScroll.current = newOffset < 1

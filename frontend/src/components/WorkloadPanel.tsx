@@ -218,10 +218,12 @@ export default function WorkloadPanel({
   clusterName,
   showLauncher = true,
   showList = true,
+  sharedRatesRef,
 }: {
   clusterName: string
   showLauncher?: boolean
   showList?: boolean
+  sharedRatesRef?: React.MutableRefObject<Record<number, number>>
 }) {
   const queryClient = useQueryClient()
 
@@ -246,7 +248,8 @@ export default function WorkloadPanel({
   const [purging, setPurging] = useState(false)
   const [rates, setRates] = useState<Record<number, number>>({})
   const [history, setHistory] = useState<DataPoint[]>([])
-  const ratesRef    = useRef<Record<number, number>>({})
+  const localRatesRef = useRef<Record<number, number>>({})
+  const ratesRef = sharedRatesRef ?? localRatesRef
   const workloadsRef = useRef<WorkloadEntry[]>([])
 
   // Recording state

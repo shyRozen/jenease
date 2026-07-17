@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
+import { useRef } from 'react'
 import { api } from '../api/client'
 import WorkloadPanel from '../components/WorkloadPanel'
 
@@ -265,6 +266,8 @@ export default function ClusterDetail() {
   const queryClient = useQueryClient()
   const me = (queryClient.getQueryData<{ username: string }>(['me']))?.username ?? ''
   const isOwner = !!name && name.toLowerCase().startsWith(me.toLowerCase())
+  // Shared rates ref so the list panel (left) and launcher panel (right) see the same MB/s for recording
+  const sharedRatesRef = useRef<Record<number, number>>({})
   const { data: health } = useQuery<HealthData>({
     queryKey: ['health', name],
     queryFn: () => api.get(`/clusters/${name}/health`),
@@ -419,7 +422,7 @@ export default function ClusterDetail() {
             ) : null}
 
             <div className="grid grid-cols-2 gap-6 items-start">
-              {/* Left: OSD tiles */}
+              {/* Left: OSD tiles + workload list/graph */}
               <div className="space-y-4">
                 {health?.osd_count ? (
                   <OsdGrid
@@ -430,14 +433,22 @@ export default function ClusterDetail() {
                     iops={health.osd_iops}
                   />
                 ) : null}
+                <WorkloadPanel
+                  clusterName={name!}
+                  showLauncher={false}
+                  sharedRatesRef={isOwner ? sharedRatesRef : undefined}
+                />
               </div>
-              {/* Right: workload panel — single instance for owners so ratesRef is shared */}
-              <div>
-                {isOwner
-                  ? <WorkloadPanel clusterName={name!} />
-                  : <WorkloadPanel clusterName={name!} showLauncher={false} />
-                }
-              </div>
+              {/* Right: launcher + recording (owner only) — shares ratesRef with list panel */}
+              {isOwner && (
+                <div>
+                  <WorkloadPanel
+                    clusterName={name!}
+                    showList={false}
+                    sharedRatesRef={sharedRatesRef}
+                  />
+                </div>
+              )}
             </div>
           </div>
         </section>

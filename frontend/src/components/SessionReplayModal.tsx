@@ -117,26 +117,15 @@ export default function SessionReplayModal({ session, onClose }: { session: Sess
     setCurrentMs(totalMs)
   }
 
-  // Full recording duration in seconds (for chart x-axis)
-  const durationSecs = Math.ceil(totalMs / 1000) || 60
-
-  // Build display data — anchor to a fixed start so the chart window doesn't shift
-  // We add a synthetic t=0 point so the x-axis always starts at recording start
-  const anchor: DataPoint = { ts: session.started_at_ms, rbd: 0, cephfs: 0, noobaa: 0, total: 0 }
-  const displayData: DataPoint[] = [
-    anchor,
-    ...session.throughput
-      .filter(t => t.offset_ms <= currentMs)
-      .map(t => ({
-        ts: session.started_at_ms + t.offset_ms,
-        rbd: t.rbd,
-        cephfs: t.cephfs,
-        noobaa: t.noobaa,
-        total: t.total,
-      })),
-    // Anchor end point at the full duration so the window stays fixed
-    { ts: session.started_at_ms + totalMs, rbd: 0, cephfs: 0, noobaa: 0, total: 0 },
-  ]
+  const displayData: DataPoint[] = session.throughput
+    .filter(t => t.offset_ms <= currentMs)
+    .map(t => ({
+      ts: session.started_at_ms + t.offset_ms,
+      rbd: t.rbd,
+      cephfs: t.cephfs,
+      noobaa: t.noobaa,
+      total: t.total,
+    }))
 
   // Close on Escape
   useEffect(() => {
@@ -183,7 +172,7 @@ export default function SessionReplayModal({ session, onClose }: { session: Sess
 
         {/* Chart */}
         <div className="px-5 pt-2 pb-2">
-          <ThroughputChart data={displayData} visibleSecs={durationSecs} />
+          <ThroughputChart data={displayData} />
         </div>
 
         {/* Workload event markers (timeline labels below chart) */}

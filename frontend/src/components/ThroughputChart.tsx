@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 
 export interface DataPoint {
   ts: number
@@ -27,6 +27,7 @@ function niceMax(v: number) {
 
 export default function ThroughputChart({ data, visibleSecs }: { data: DataPoint[]; visibleSecs?: number }) {
   const VISIBLE = visibleSecs ?? VISIBLE_SECS
+  const uid = useId().replace(/:/g, '')  // unique per instance — clipPath IDs must be unique in DOM
   const containerRef = useRef<HTMLDivElement>(null)
   const [width, setWidth]       = useState(400)
   const [offset, setOffset]     = useState(0) // seconds from right (0 = live)
@@ -160,7 +161,7 @@ export default function ThroughputChart({ data, visibleSecs }: { data: DataPoint
 
         {/* Clip region */}
         <defs>
-          <clipPath id="plot-clip">
+          <clipPath id={`plot-clip-${uid}`}>
             <rect x={PAD.left} y={PAD.top} width={W} height={H} />
           </clipPath>
           <linearGradient id="area-grad" x1="0" y1="0" x2="0" y2="1">
@@ -171,7 +172,7 @@ export default function ThroughputChart({ data, visibleSecs }: { data: DataPoint
 
         {/* Total area fill */}
         {areaPath && (
-          <path d={areaPath} fill="url(#area-grad)" clipPath="url(#plot-clip)" />
+          <path d={areaPath} fill="url(#area-grad)" clipPath={`url(#plot-clip-${uid})`} />
         )}
 
         {/* Per-series lines (draw total last so it's on top) */}
@@ -182,7 +183,7 @@ export default function ThroughputChart({ data, visibleSecs }: { data: DataPoint
               strokeWidth={s.key === 'total' ? 1.5 : 1}
               strokeDasharray={s.dash}
               strokeOpacity={s.key === 'total' ? 0.7 : 0.9}
-              strokeLinejoin="round" clipPath="url(#plot-clip)" />
+              strokeLinejoin="round" clipPath={`url(#plot-clip-${uid})`} />
           ) : null
         })}
 
@@ -191,7 +192,7 @@ export default function ThroughputChart({ data, visibleSecs }: { data: DataPoint
           const last = visible[visible.length - 1]
           return (
             <circle cx={tsToX(last.ts)} cy={valToY(last.total)} r={3}
-              fill="#e6edf3" clipPath="url(#plot-clip)" />
+              fill="#e6edf3" clipPath={`url(#plot-clip-${uid})`} />
           )
         })()}
 

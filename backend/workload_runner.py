@@ -484,7 +484,7 @@ async def create_workload(
                 kubeconfig_url, namespace, pvc_name, pod_name,
                 workload_type, size_gb, mode, pattern,
                 block_size, num_jobs, iodepth, duration_sec, engine, direct),
-            timeout=60.0,
+            timeout=120.0,
         )
 
 

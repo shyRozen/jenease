@@ -61,36 +61,51 @@ function fmtParams(e: SessionEvent): string {
 
 export default function SessionReplayModal({ session, onClose }: { session: SessionFull; onClose: () => void }) {
   const [playing, setPlaying]   = useState(false)
-  const [speed, setSpeed]       = useState(2)  // default 2x so progress is obvious
+  const [speed, setSpeed]       = useState(2)
   const [currentMs, setCurrentMs] = useState(0)
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const rafRef    = useRef<number | null>(null)
+  const lastTsRef = useRef<number | null>(null)
+  const playingRef = useRef(false)
+  const speedRef   = useRef(2)
+  playingRef.current = playing
+  speedRef.current   = speed
 
   const totalMs = session.duration_ms
     || (session.throughput.length > 0
         ? session.throughput[session.throughput.length - 1].offset_ms
         : 0)
+  const totalMsRef = useRef(totalMs)
+  totalMsRef.current = totalMs
 
-  // Playback engine — keep setCurrentMs updater pure (no side effects)
+  // rAF-based playback — immune to Strict Mode double-run and stale closures
   useEffect(() => {
-    if (intervalRef.current) clearInterval(intervalRef.current)
-    if (!playing) return
-
-    const tickMs = Math.max(16, 1000 / speed)  // cap at ~60 fps
-    const stepMs = 1000                          // advance 1 real second per tick
-
-    intervalRef.current = setInterval(() => {
-      setCurrentMs(prev => Math.min(prev + stepMs, totalMs))
-    }, tickMs)
-
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
-  }, [playing, speed, totalMs])
-
-  // Stop when we reach the end
-  useEffect(() => {
-    if (playing && currentMs >= totalMs && totalMs > 0) {
-      setPlaying(false)
+    if (!playing) {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+      lastTsRef.current = null
+      return
     }
-  }, [currentMs, totalMs, playing])
+    lastTsRef.current = null
+    function tick(now: number) {
+      if (!playingRef.current) return
+      if (lastTsRef.current !== null) {
+        const realElapsed = now - lastTsRef.current           // ms since last frame
+        const recordingElapsed = realElapsed * speedRef.current  // scaled recording ms
+        setCurrentMs(prev => {
+          const next = prev + recordingElapsed
+          if (next >= totalMsRef.current) {
+            playingRef.current = false
+            setPlaying(false)
+            return totalMsRef.current
+          }
+          return next
+        })
+      }
+      lastTsRef.current = now
+      rafRef.current = requestAnimationFrame(tick)
+    }
+    rafRef.current = requestAnimationFrame(tick)
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }
+  }, [playing])
 
   function reset() {
     setPlaying(false)
@@ -140,8 +155,17 @@ export default function SessionReplayModal({ session, onClose }: { session: Sess
           <button onClick={onClose} className="text-text-muted hover:text-text-primary text-lg font-mono leading-none">✕</button>
         </div>
 
+        {/* Debug info — remove once confirmed working */}
+        <div className="px-5 pt-2 text-[9px] font-mono text-text-muted flex gap-4">
+          <span>samples: {session.throughput.length}</span>
+          <span>totalMs: {totalMs}</span>
+          <span>currentMs: {currentMs}</span>
+          <span>visible: {displayData.length}</span>
+          <span>maxMBs: {Math.max(0, ...displayData.map(d => d.total)).toFixed(0)}</span>
+        </div>
+
         {/* Chart */}
-        <div className="px-5 pt-4 pb-2">
+        <div className="px-5 pt-2 pb-2">
           <ThroughputChart data={displayData} />
         </div>
 

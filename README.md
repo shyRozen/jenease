@@ -69,15 +69,30 @@ RLocker (locker queue status, no auth needed)
 ### IO Workloads
 - Launch RBD, CephFS, or NooBaa workloads from cluster detail (owner only)
 - **RBD / CephFS**: `quay.io/ocsci/nginx:latest` (Alpine + fio 3.41)
-  - `numjobs=4`, `bs=1m iodepth=32` (sequential), `bs=4k iodepth=64` (random)
-  - Per-job size = total_size / numjobs (fixes 4× PVC overflow bug)
-- **NooBaa**: `ubi9/python-311` + boto3, 8 workers × 64MB objects
-- Live log terminal (SSE), progress bar from fio output, rate in MB/s
-- **Throughput chart**: live SVG chart with RBD/CephFS/NooBaa/Total lines
-  - 60s moving window, drag right to scroll history (up to 10 min)
-  - Throughput summary bar below chart
+  - Configurable: size (1/10/50/100GB), mode, pattern, block size (4k–4m), numjobs (1–8), iodepth (1–128), duration (size/30s/1m/5m), IO engine (psync/posixaio/io_uring/libaio), Direct IO toggle
+  - RBD default: libaio + `--direct=1` (bypasses page cache); wrapped in `script -q -c` for live output
+  - CephFS default: libaio, no `--direct=1` (O_DIRECT not supported on CephFS)
+  - Per-job size = total_size / numjobs (prevents 4× PVC overflow)
+- **NooBaa**: `ubi9/python-311` + boto3; configurable object size (1–256MB) and workers (1–32)
+- Live log terminal (SSE), progress bar, rate in MB/s
+- **Throughput chart**: live SVG, RBD/CephFS/NooBaa/Total lines, 60s window, drag-scrollable
 - Cleanup: pod → OBC finalizer → PVC → namespace (shown in log terminal)
 - Purge button for orphaned `jenease-wl-*` namespaces
+- **⬇ Pre-pull image on all nodes**: DaemonSet-based cache warmer for fio + NooBaa images — run once per cluster to avoid 3-6 min image pull delays on uncached nodes
+- Workload namespace uses `uuid4` (not timestamp) to prevent concurrent-launch name collisions
+
+### Workload Sessions Recording
+- **Record** button in workload panel captures throughput (1s samples) + workload events with timing
+- **Play Graph**: floating modal, auto-plays, speed 1x/2x/5x/10x/Max, rAF-based animation
+- **Deploy**: re-launches the recorded sequence on any cluster with original timing
+- Sessions stored in SQLite, survive page navigation; throughput requires page open
+
+### Workload Sequences
+- **+ Add to Sequence**: captures current form params into a timed step list
+- Each step has an editable `T+Xs` offset (seconds from sequence start T=0)
+- **Run**: fires each workload at its offset using `setTimeout`; optional "Start recording with sequence" checkbox
+- **Save/Load**: sequences stored globally in SQLite, visible to owner by default; "Load all sequences" expands to all users
+- Saved sequences show Load / ▶ Run / trash buttons; delete only for owner
 
 ### All Clusters Page (`/all-clusters`)
 - Shows ALL active clusters across all Jenkins users (not just yours)

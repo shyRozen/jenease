@@ -727,20 +727,19 @@ async def stream_pod_logs(
 
 
 def _sync_prepull_images(kubeconfig_url: str) -> str:
-    """Create a DaemonSet on all workers to pre-pull the fio image, wait, delete. Returns status."""
+    """Create a DaemonSet on all workers to pre-pull fio + NooBaa images. Returns status."""
     from kubernetes import client as _k8s
     core, _, _cfg, api_client = _sync_load_k8s(kubeconfig_url)
     apps_v1 = _k8s.AppsV1Api(api_client)
     ns = "jenease-prepull"
-    ds_name = "jenease-prepull-fio"
+    ds_name = "jenease-prepull-images"
     try:
         core.create_namespace(_k8s.V1Namespace(metadata=_k8s.V1ObjectMeta(name=ns)))
     except Exception:
         pass
-    # Delete any existing DaemonSet first
     try:
-        apps_v1.delete_namespaced_daemon_set(ds_name, ns)
-        time.sleep(3)
+        apps_v1.delete_namespaced_daemon_set(ds_name, ns, body=_k8s.V1DeleteOptions(propagation_policy="Background"))
+        time.sleep(5)
     except Exception:
         pass
     ds = _k8s.V1DaemonSet(
@@ -751,11 +750,15 @@ def _sync_prepull_images(kubeconfig_url: str) -> str:
                 metadata=_k8s.V1ObjectMeta(labels={"app": ds_name}),
                 spec=_k8s.V1PodSpec(
                     tolerations=[_k8s.V1Toleration(operator="Exists")],
+                    # Two init containers pull the images; main container is trivial
+                    init_containers=[
+                        _k8s.V1Container(name="pull-fio",    image=IO_IMAGE,     command=["echo", "fio ready"],    image_pull_policy="IfNotPresent"),
+                        _k8s.V1Container(name="pull-noobaa", image=NOOBAA_IMAGE, command=["echo", "noobaa ready"], image_pull_policy="IfNotPresent"),
+                    ],
                     containers=[_k8s.V1Container(
-                        name="prepull",
-                        image=IO_IMAGE,
-                        command=["sh", "-c", "echo pulled && sleep 5"],
-                        image_pull_policy="Always",
+                        name="done", image="busybox:latest",
+                        command=["sh", "-c", "echo images cached && sleep 10"],
+                        image_pull_policy="IfNotPresent",
                     )],
                     restart_policy="Always",
                     node_selector={"node-role.kubernetes.io/worker": ""},
@@ -764,23 +767,22 @@ def _sync_prepull_images(kubeconfig_url: str) -> str:
         ),
     )
     apps_v1.create_namespaced_daemon_set(ns, ds)
-    # Wait up to 5 min for all pods to be Running/Succeeded
-    for _ in range(60):
+    desired = ready = 0
+    for _ in range(72):   # up to 6 minutes
         time.sleep(5)
         try:
             status = apps_v1.read_namespaced_daemon_set_status(ds_name, ns)
             desired = status.status.desired_number_scheduled or 0
-            ready = status.status.number_ready or 0
+            ready   = status.status.number_ready or 0
             if desired > 0 and ready >= desired:
                 break
         except Exception:
             pass
-    # Cleanup
     try:
         apps_v1.delete_namespaced_daemon_set(ds_name, ns, body=_k8s.V1DeleteOptions(propagation_policy="Background"))
     except Exception:
         pass
-    return f"Image pre-pulled on {ready}/{desired} nodes"
+    return f"fio + NooBaa images cached on {ready}/{desired} worker nodes"
 
 
 async def prepull_workload_image(kubeconfig_url: str) -> str:

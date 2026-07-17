@@ -297,7 +297,7 @@ export default function ClusterDetail() {
   const osd = health?.odf
 
   return (
-    <div className="p-6 w-full space-y-6 h-full overflow-y-auto">
+    <div className="p-8 w-full max-w-[1800px] space-y-6 h-full overflow-y-auto">
       {/* Breadcrumb */}
       <div className="flex items-center gap-2 text-sm font-mono">
         <Link to="/clusters" className="text-text-muted hover:text-accent-cyan transition-colors">
@@ -421,7 +421,7 @@ export default function ClusterDetail() {
               <OsdCapacityBar capacity={health.ceph_capacity} />
             ) : null}
 
-            <div className="grid grid-cols-2 gap-6 items-start">
+            <div className="grid gap-8 items-start" style={{ gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr)' }}>
               {/* Left: OSD tiles + workload list/graph */}
               <div className="space-y-4">
                 {health?.osd_count ? (

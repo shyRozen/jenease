@@ -16,6 +16,14 @@ html {
   background-color: #070b0f;
 }
 
+/* Scale up for large/4K displays so elements don't look tiny */
+@media (min-width: 2560px) {
+  html { font-size: 18px; }
+}
+@media (min-width: 3200px) {
+  html { font-size: 20px; }
+}
+
 @layer base {
   body {
     @apply text-text-primary font-sans;

@@ -61,7 +61,7 @@ function fmtParams(e: SessionEvent): string {
 
 export default function SessionReplayModal({ session, onClose }: { session: SessionFull; onClose: () => void }) {
   const [playing, setPlaying]   = useState(true)   // auto-play on open
-  const [speed, setSpeed]       = useState(2)
+  const [speed, setSpeed]       = useState(1)
   const [currentMs, setCurrentMs] = useState(0)
   const rafRef    = useRef<number | null>(null)
   const lastTsRef = useRef<number | null>(null)

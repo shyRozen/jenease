@@ -33,6 +33,15 @@ class WorkloadSession(SQLModel, table=True):
     throughput: str = "[]"         # JSON: [{offset_ms, rbd, cephfs, noobaa, total}]
 
 
+class WorkloadSequence(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    username: str
+    items: str = "[]"  # JSON: [{offset_sec, workload_type, size_gb, mode, ...}]
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class Preset(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(index=True)

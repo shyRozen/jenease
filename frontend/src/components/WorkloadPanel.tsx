@@ -245,6 +245,24 @@ export default function WorkloadPanel({
   const [launching, setLaunching] = useState(false)
   const [launchError, setLaunchError] = useState('')
 
+  // ── Sequence state ──────────────────────────────────────────────────────
+  interface SeqItem {
+    id: number; offset_sec: number; workload_type: string; size_gb: number
+    mode: string; pattern: string; block_size: string; num_jobs: number
+    iodepth: number; duration_sec: number; obj_size_mb: number; workers: number
+    engine: string; direct: boolean
+  }
+  const [seqItems,    setSeqItems]    = useState<SeqItem[]>([])
+  const [seqName,     setSeqName]     = useState('')
+  const [seqRecord,   setSeqRecord]   = useState(false)
+  const [seqRunning,  setSeqRunning]  = useState(false)
+  const [seqCounter,  setSeqCounter]  = useState(0)   // local id generator
+  const { data: savedSeqs = [], refetch: refetchSeqs } = useQuery<any[]>({
+    queryKey: ['sequences'],
+    queryFn: () => api.get('/sequences/'),
+    staleTime: 30_000,
+  })
+
   const [purging, setPurging] = useState(false)
   const [rates, setRates] = useState<Record<number, number>>({})
   const [history, setHistory] = useState<DataPoint[]>([])
@@ -447,6 +465,60 @@ export default function WorkloadPanel({
     return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
   }
 
+  function captureCurrentParams() {
+    return { workload_type: type, size_gb: size, mode, pattern, block_size: blockSize,
+      num_jobs: numJobs, iodepth, duration_sec: duration, obj_size_mb: objSizeMb,
+      workers, engine, direct }
+  }
+
+  function handleAddToSequence() {
+    const lastOffset = seqItems.length > 0 ? seqItems[seqItems.length - 1].offset_sec : -10
+    const id = seqCounter + 1; setSeqCounter(id)
+    setSeqItems(prev => [...prev, { id, offset_sec: Math.max(0, lastOffset + 10), ...captureCurrentParams() }])
+  }
+
+  async function handleRunSequence() {
+    if (seqItems.length === 0) return
+    setSeqRunning(true)
+    let sessionId: number | null = null
+    if (seqRecord) {
+      try {
+        const res = await api.post<{ id: number; name: string }>('/sessions/', { cluster_name: clusterName })
+        sessionId = res.id; setRecordingId(res.id); setRecordingStart(Date.now()); setRecordingElapsed(0)
+      } catch { /* best-effort */ }
+    }
+    const t0 = Date.now()
+    for (const item of [...seqItems].sort((a, b) => a.offset_sec - b.offset_sec)) {
+      const delay = item.offset_sec * 1000 - (Date.now() - t0)
+      await new Promise(r => setTimeout(r, Math.max(0, delay)))
+      api.post(`/clusters/${clusterName}/workloads`, { ...item, session_id: sessionId }).then(() => refetch()).catch(() => {})
+    }
+    setSeqRunning(false)
+  }
+
+  async function handleSaveSequence() {
+    const name = seqName.trim() || `Sequence ${new Date().toLocaleTimeString()}`
+    await api.post('/sequences/', { name, items: seqItems.map(({ id: _id, ...rest }) => rest) })
+    refetchSeqs()
+  }
+
+  async function handleDeleteSeq(id: number) {
+    await api.delete(`/sequences/${id}`)
+    refetchSeqs()
+  }
+
+  function loadSavedSeq(s: any) {
+    let counter = seqCounter
+    setSeqItems(s.items.map((item: any) => { counter++; return { id: counter, ...item } }))
+    setSeqCounter(counter)
+    setSeqName(s.name)
+  }
+
+  function seqItemLabel(item: SeqItem) {
+    if (item.workload_type === 'noobaa') return `NooBaa ${item.size_gb}GB ${item.mode}`
+    return `${item.workload_type.toUpperCase()} ${item.size_gb}GB ${item.mode} ${item.pattern}`
+  }
+
   function Btn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
     return (
       <button
@@ -604,7 +676,66 @@ export default function WorkloadPanel({
             </span>
           ) : '▶ Launch Workload'}
         </button>
+
+        {/* Add to Sequence */}
+        <button onClick={handleAddToSequence}
+          className="w-full text-[10px] font-mono py-1 rounded border border-surface-4 text-text-primary hover:border-accent-amber/50 hover:text-accent-amber transition-colors">
+          + Add to Sequence
+        </button>
       </div>}
+
+      {/* ── Current Sequence ── */}
+      {showLauncher && seqItems.length > 0 && (
+        <div className="border border-accent-amber/30 rounded-lg p-3 space-y-2 bg-surface-2/30">
+          <p className="text-[9px] font-mono text-accent-amber uppercase tracking-wider">Sequence ({seqItems.length} steps)</p>
+
+          <div className="space-y-1">
+            {[...seqItems].sort((a, b) => a.offset_sec - b.offset_sec).map(item => (
+              <div key={item.id} className="flex items-center gap-2">
+                <span className="text-[9px] font-mono text-text-muted">T+</span>
+                <input
+                  type="number" min={0} value={item.offset_sec}
+                  onChange={e => setSeqItems(prev => prev.map(i => i.id === item.id ? { ...i, offset_sec: Math.max(0, Number(e.target.value)) } : i))}
+                  className="w-12 text-[10px] font-mono bg-surface-3 border border-surface-4 rounded px-1 py-0.5 text-accent-amber outline-none text-center"
+                />
+                <span className="text-[9px] font-mono text-text-muted">s</span>
+                <span className="text-[10px] font-mono text-text-secondary flex-1 truncate">{seqItemLabel(item)}</span>
+                <button onClick={() => setSeqItems(prev => prev.filter(i => i.id !== item.id))}
+                  className="text-text-muted hover:text-accent-red transition-colors shrink-0">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="11" height="11" fill="currentColor">
+                    <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/>
+                    <path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/>
+                  </svg>
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <input value={seqName} onChange={e => setSeqName(e.target.value)} placeholder="Sequence name…"
+            className="w-full text-[10px] font-mono bg-surface-3 border border-surface-4 rounded px-2 py-1 text-text-primary outline-none" />
+
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={seqRecord} onChange={e => setSeqRecord(e.target.checked)}
+              className="accent-accent-amber" />
+            <span className="text-[10px] font-mono text-text-muted">Start recording with sequence</span>
+          </label>
+
+          <div className="flex gap-1.5">
+            <button onClick={handleRunSequence} disabled={seqRunning}
+              className="flex-1 text-[10px] font-mono py-1 rounded border border-accent-green/40 text-accent-green hover:bg-accent-green/10 transition-colors disabled:opacity-50">
+              {seqRunning ? '⏳ Running…' : '▶ Run'}
+            </button>
+            <button onClick={handleSaveSequence}
+              className="flex-1 text-[10px] font-mono py-1 rounded border border-accent-amber/40 text-accent-amber hover:bg-accent-amber/10 transition-colors">
+              💾 Save
+            </button>
+            <button onClick={() => setSeqItems([])}
+              className="text-[10px] font-mono px-2 py-1 rounded border border-surface-4 text-text-muted hover:text-accent-red hover:border-accent-red/40 transition-colors">
+              ✕ Clear
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── Recording section ── */}
       {showLauncher && (
@@ -801,6 +932,35 @@ export default function WorkloadPanel({
         </button>
       )}
     </div>
+
+      {/* ── Saved Sequences ── */}
+      {showLauncher && savedSeqs.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Saved Sequences</p>
+          {savedSeqs.map((s: any) => (
+            <div key={s.id} className="border border-surface-4 rounded-lg px-2.5 py-2 bg-surface-2/20 flex items-center gap-2">
+              <div className="flex-1 min-w-0">
+                <p className="text-[10px] font-mono text-text-primary truncate">{s.name}</p>
+                <p className="text-[9px] font-mono text-text-muted">{s.items.length} steps · by {s.username}</p>
+              </div>
+              <button onClick={() => loadSavedSeq(s)} title="Load into editor"
+                className="text-[9px] font-mono text-text-muted hover:text-accent-amber transition-colors shrink-0">Load</button>
+              <button onClick={async () => {
+                loadSavedSeq(s)
+                await handleRunSequence()
+              }} title="Run directly"
+                className="text-[9px] font-mono text-text-muted hover:text-accent-green transition-colors shrink-0">▶</button>
+              <button onClick={() => handleDeleteSeq(s.id)} title="Delete"
+                className="text-text-muted hover:text-accent-red transition-colors shrink-0">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="11" height="11" fill="currentColor">
+                  <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/>
+                  <path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/>
+                </svg>
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
     {/* Session replay modal — renders outside the panel div so it overlays everything */}
     {replaySession && (

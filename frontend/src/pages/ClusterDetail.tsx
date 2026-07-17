@@ -419,7 +419,7 @@ export default function ClusterDetail() {
             ) : null}
 
             <div className="grid grid-cols-2 gap-6 items-start">
-              {/* Left: OSD tiles + active workloads below */}
+              {/* Left: OSD tiles */}
               <div className="space-y-4">
                 {health?.osd_count ? (
                   <OsdGrid
@@ -430,7 +430,9 @@ export default function ClusterDetail() {
                     iops={health.osd_iops}
                   />
                 ) : null}
-                {/* Single panel for owners (launcher + list share ratesRef for recording) */}
+              </div>
+              {/* Right: workload panel — single instance for owners so ratesRef is shared */}
+              <div>
                 {isOwner
                   ? <WorkloadPanel clusterName={name!} />
                   : <WorkloadPanel clusterName={name!} showLauncher={false} />

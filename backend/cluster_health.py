@@ -412,6 +412,57 @@ async def fetch_cluster_health(
     return None
 
 
+async def fetch_cluster_iops(
+    kubeconfig_url: Optional[str] = None,
+    console_url: Optional[str] = None,
+    kubeadmin_password: Optional[str] = None,
+) -> dict:
+    """Fetch only OSD IOPS — lighter than full health, called on its own 5-second cycle."""
+    loop = asyncio.get_event_loop()
+
+    async def _get_iops(api_url: str, password: str, proxy: Optional[str]) -> dict:
+        token = await _get_oauth_token(api_url, password, proxy_url=proxy)
+        if not token:
+            return {}
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, _query_osd_iops, api_url, token, proxy),
+            timeout=8.0,
+        )
+
+    # Primary: kubeconfig from magna002
+    if kubeconfig_url:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as c:
+                r = await c.get(kubeconfig_url)
+                if r.is_success and 'not available' not in r.text.lower():
+                    kube_dict = yaml.safe_load(r.text)
+                    kube_proxy, kube_api_url = None, None
+                    for entry in kube_dict.get('clusters', []):
+                        d = entry.get('cluster', {})
+                        kube_proxy = d.get('proxy-url')
+                        kube_api_url = d.get('server')
+                        break
+                    if kube_api_url and kubeadmin_password:
+                        result = await _get_iops(kube_api_url, kubeadmin_password, kube_proxy)
+                        if result:
+                            return result
+        except Exception:
+            pass
+
+    # Fallback: OAuth direct
+    if console_url and kubeadmin_password:
+        domain = _extract_cluster_domain(console_url)
+        if domain:
+            try:
+                result = await _get_iops(f'https://api.{domain}:6443', kubeadmin_password, None)
+                if result:
+                    return result
+            except Exception:
+                pass
+
+    return {}
+
+
 def _sync_query_details(api_url: str, token: str) -> dict:
     """Fetch pods + PVCs + node conditions for the detail view. Runs in thread pool."""
     from kubernetes import client

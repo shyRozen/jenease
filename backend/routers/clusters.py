@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from auth import get_session
-from cluster_health import _parse_topology, fetch_cluster_details, fetch_cluster_health
+from cluster_health import _parse_topology, fetch_cluster_details, fetch_cluster_health, fetch_cluster_iops
 from jenkins import JenkinsClient
 from config import settings
 
@@ -432,6 +432,27 @@ async def cluster_health(cluster_name: str, session: dict = Depends(get_session)
         "odf_full_version": health.get("odf_full_version"),
         "osd_iops": health.get("osd_iops"),
     }
+
+
+@router.get("/{cluster_name}/iops")
+async def cluster_iops_endpoint(cluster_name: str, session: dict = Depends(get_session)):
+    """Dedicated OSD IOPS endpoint — lighter than full health, called every 5s."""
+    jenkins = _make_client(session)
+    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+    target = None
+    for b in builds:
+        if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+            target = b
+            break
+    if not target:
+        return {}
+    parsed = JenkinsClient.parse_build_description(target.get("description", "") or "")
+    result = await fetch_cluster_iops(
+        kubeconfig_url=parsed.get("kubeconfig_url"),
+        console_url=parsed.get("console_url"),
+        kubeadmin_password=parsed.get("kubeadmin_password"),
+    )
+    return result
 
 
 @router.get("/{cluster_name}/stage")

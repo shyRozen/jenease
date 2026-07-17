@@ -276,6 +276,16 @@ export default function ClusterDetail() {
     refetchInterval: 3_000,
   })
 
+  // Dedicated IOPS query — every 5s, independent of full health check
+  const { data: iopsData } = useQuery<{ osd_iops?: Record<string, { r?: number; w?: number }> }>({
+    queryKey: ['iops', name],
+    queryFn: () => api.get(`/clusters/${name}/iops`),
+    refetchInterval: 5_000,
+    staleTime: 4_000,
+    retry: false,
+    enabled: health?.status === 'HEALTHY' || health?.status === 'DEGRADED',
+  })
+
   const { data: details, isLoading: detailsLoading } = useQuery<DetailsData>({
     queryKey: ['details', name],
     queryFn: () => api.get(`/clusters/${name}/details`),
@@ -431,7 +441,7 @@ export default function ClusterDetail() {
                     up={health.osd_up ?? health.osd_count}
                     osdSize={cluster?.osd_size}
                     capacity={health.ceph_capacity}
-                    iops={health.osd_iops}
+                    iops={iopsData?.osd_iops ?? health.osd_iops}
                   />
                 ) : null}
                 <WorkloadPanel

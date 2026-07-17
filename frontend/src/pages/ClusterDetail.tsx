@@ -294,7 +294,7 @@ export default function ClusterDetail() {
   const osd = health?.odf
 
   return (
-    <div className="p-6 max-w-6xl space-y-6 h-full overflow-y-auto">
+    <div className="p-6 w-full space-y-6 h-full overflow-y-auto">
       {/* Breadcrumb */}
       <div className="flex items-center gap-2 text-sm font-mono">
         <Link to="/clusters" className="text-text-muted hover:text-accent-cyan transition-colors">

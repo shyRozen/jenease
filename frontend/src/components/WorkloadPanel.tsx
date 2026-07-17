@@ -257,9 +257,10 @@ export default function WorkloadPanel({
   const [seqRecord,   setSeqRecord]   = useState(false)
   const [seqRunning,  setSeqRunning]  = useState(false)
   const [seqCounter,  setSeqCounter]  = useState(0)   // local id generator
+  const [showAllSeqs, setShowAllSeqs] = useState(false)
   const { data: savedSeqs = [], refetch: refetchSeqs } = useQuery<any[]>({
-    queryKey: ['sequences'],
-    queryFn: () => api.get('/sequences/'),
+    queryKey: ['sequences', showAllSeqs],
+    queryFn: () => api.get(`/sequences/${showAllSeqs ? '?all=true' : ''}`),
     staleTime: 30_000,
   })
 
@@ -934,32 +935,56 @@ export default function WorkloadPanel({
     </div>
 
       {/* ── Saved Sequences ── */}
-      {showLauncher && savedSeqs.length > 0 && (
+      {showLauncher && (savedSeqs.length > 0 || showAllSeqs) && (
         <div className="space-y-1.5">
-          <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Saved Sequences</p>
-          {savedSeqs.map((s: any) => (
-            <div key={s.id} className="border border-surface-4 rounded-lg px-2.5 py-2 bg-surface-2/20 flex items-center gap-2">
-              <div className="flex-1 min-w-0">
-                <p className="text-[10px] font-mono text-text-primary truncate">{s.name}</p>
-                <p className="text-[9px] font-mono text-text-muted">{s.items.length} steps · by {s.username}</p>
+          <div className="flex items-center justify-between">
+            <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">
+              {showAllSeqs ? 'All Sequences' : 'My Sequences'}
+            </p>
+            <button onClick={() => setShowAllSeqs(v => !v)}
+              className="text-[9px] font-mono text-text-muted hover:text-accent-cyan transition-colors">
+              {showAllSeqs ? '← My sequences' : '⊕ Load all sequences'}
+            </button>
+          </div>
+          {savedSeqs.length === 0 && (
+            <p className="text-[9px] font-mono text-text-muted">No sequences yet.</p>
+          )}
+          {savedSeqs.map((s: any) => {
+            const isOwner = s.username === queryClient.getQueryData<{username:string}>(['me'])?.username
+            return (
+              <div key={s.id} className="border border-surface-4 rounded-lg px-2.5 py-2 bg-surface-2/20 flex items-center gap-2">
+                <div className="flex-1 min-w-0">
+                  <p className="text-[10px] font-mono text-text-primary truncate">{s.name}</p>
+                  <p className="text-[9px] font-mono text-text-muted">
+                    {s.items.length} steps{showAllSeqs ? ` · ${s.username}` : ''}
+                  </p>
+                </div>
+                <button onClick={() => loadSavedSeq(s)} title="Load into editor"
+                  className="text-[9px] font-mono text-text-muted hover:text-accent-amber transition-colors shrink-0">Load</button>
+                <button onClick={async () => { loadSavedSeq(s); setTimeout(handleRunSequence, 50) }}
+                  title="Run directly"
+                  className="text-[9px] font-mono text-text-muted hover:text-accent-green transition-colors shrink-0">▶</button>
+                {isOwner && (
+                  <button onClick={() => handleDeleteSeq(s.id)} title="Delete"
+                    className="text-text-muted hover:text-accent-red transition-colors shrink-0">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="11" height="11" fill="currentColor">
+                      <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/>
+                      <path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/>
+                    </svg>
+                  </button>
+                )}
               </div>
-              <button onClick={() => loadSavedSeq(s)} title="Load into editor"
-                className="text-[9px] font-mono text-text-muted hover:text-accent-amber transition-colors shrink-0">Load</button>
-              <button onClick={async () => {
-                loadSavedSeq(s)
-                await handleRunSequence()
-              }} title="Run directly"
-                className="text-[9px] font-mono text-text-muted hover:text-accent-green transition-colors shrink-0">▶</button>
-              <button onClick={() => handleDeleteSeq(s.id)} title="Delete"
-                className="text-text-muted hover:text-accent-red transition-colors shrink-0">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="11" height="11" fill="currentColor">
-                  <path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/>
-                  <path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/>
-                </svg>
-              </button>
-            </div>
-          ))}
+            )
+          })}
         </div>
+      )}
+
+      {/* Show "Load all sequences" even when list is empty and not expanded */}
+      {showLauncher && savedSeqs.length === 0 && !showAllSeqs && (
+        <button onClick={() => setShowAllSeqs(true)}
+          className="text-[9px] font-mono text-text-muted hover:text-accent-cyan transition-colors">
+          ⊕ Load all sequences
+        </button>
       )}
 
     {/* Session replay modal — renders outside the panel div so it overlays everything */}

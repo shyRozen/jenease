@@ -52,9 +52,12 @@ def _to_dict(ws: WorkloadSequence) -> dict:
 
 
 @router.get("/")
-def list_sequences(auth: dict = Depends(get_session)):
+def list_sequences(all: bool = False, auth: dict = Depends(get_session)):
     with Session(engine) as db:
-        rows = db.exec(select(WorkloadSequence).order_by(WorkloadSequence.updated_at.desc())).all()
+        q = select(WorkloadSequence).order_by(WorkloadSequence.updated_at.desc())
+        if not all:
+            q = q.where(WorkloadSequence.username == auth["username"])
+        rows = db.exec(q).all()
     return [_to_dict(ws) for ws in rows]
 
 

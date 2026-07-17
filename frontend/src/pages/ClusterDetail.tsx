@@ -297,7 +297,8 @@ export default function ClusterDetail() {
   const osd = health?.odf
 
   return (
-    <div className="p-8 w-full max-w-[1800px] space-y-6 h-full overflow-y-auto">
+    <div className="w-full h-full overflow-y-auto">
+    <div className="p-8 max-w-[1800px] space-y-6">
       {/* Breadcrumb */}
       <div className="flex items-center gap-2 text-sm font-mono">
         <Link to="/clusters" className="text-text-muted hover:text-accent-cyan transition-colors">
@@ -503,6 +504,7 @@ export default function ClusterDetail() {
           Cluster is unreachable — cannot fetch pod or PVC data.
         </div>
       )}
+    </div>
     </div>
   )
 }

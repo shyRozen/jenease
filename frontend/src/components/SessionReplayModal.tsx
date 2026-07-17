@@ -60,7 +60,7 @@ function fmtParams(e: SessionEvent): string {
 }
 
 export default function SessionReplayModal({ session, onClose }: { session: SessionFull; onClose: () => void }) {
-  const [playing, setPlaying]   = useState(false)
+  const [playing, setPlaying]   = useState(true)   // auto-play on open
   const [speed, setSpeed]       = useState(2)
   const [currentMs, setCurrentMs] = useState(0)
   const rafRef    = useRef<number | null>(null)
@@ -154,21 +154,6 @@ export default function SessionReplayModal({ session, onClose }: { session: Sess
           <button onClick={onClose} className="text-text-muted hover:text-text-primary text-lg font-mono leading-none">✕</button>
         </div>
 
-        {/* Debug info — remove once confirmed working */}
-        {(() => {
-          const firstSample = session.throughput[0]
-          const firstNonZero = session.throughput.find(t => t.total > 0)
-          return (
-            <div className="px-5 pt-2 text-[9px] font-mono text-text-muted flex gap-3 flex-wrap">
-              <span className={playing ? 'text-accent-green' : ''}>playing: {playing ? 'YES' : 'no'}</span>
-              <span>cur: {Math.round(currentMs)}ms</span>
-              <span>total: {totalMs}ms</span>
-              <span>visible: {displayData.length}</span>
-              <span>first@: {firstSample?.offset_ms ?? '—'}ms</span>
-              <span>IO@: {firstNonZero?.offset_ms ?? '—'}ms ({firstNonZero ? `${firstNonZero.total.toFixed(0)}MB/s` : 'none'})</span>
-            </div>
-          )
-        })()}
 
         {/* Chart */}
         <div className="px-5 pt-2 pb-2">

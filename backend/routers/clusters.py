@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from auth import get_session
 from cluster_health import _parse_topology, fetch_cluster_details, fetch_cluster_health, fetch_cluster_iops
+from workload_runner import prepull_workload_image
 from jenkins import JenkinsClient
 from config import settings
 
@@ -432,6 +433,20 @@ async def cluster_health(cluster_name: str, session: dict = Depends(get_session)
         "odf_full_version": health.get("odf_full_version"),
         "osd_iops": health.get("osd_iops"),
     }
+
+
+@router.post("/{cluster_name}/prepull")
+async def prepull_images(cluster_name: str, session: dict = Depends(get_session)):
+    """Pre-pull the fio workload image on all worker nodes via a DaemonSet."""
+    jenkins = _make_client(session)
+    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+    for b in builds:
+        if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+            parsed = JenkinsClient.parse_build_description(b.get("description", "") or "")
+            if parsed.get("kubeconfig_url"):
+                msg = await prepull_workload_image(parsed["kubeconfig_url"])
+                return {"ok": True, "message": msg}
+    raise HTTPException(404, "Cluster kubeconfig not found")
 
 
 @router.get("/{cluster_name}/iops")

@@ -265,6 +265,8 @@ export default function WorkloadPanel({
   })
 
   const [purging, setPurging] = useState(false)
+  const [prepulling, setPrepulling] = useState(false)
+  const [prepullMsg, setPrepullMsg] = useState('')
   const [rates, setRates] = useState<Record<number, number>>({})
   const [history, setHistory] = useState<DataPoint[]>([])
   const localRatesRef = useRef<Record<number, number>>({})
@@ -933,6 +935,23 @@ export default function WorkloadPanel({
         >
           {purging ? 'Purging…' : '⚠ Purge all orphaned namespaces'}
         </button>
+      )}
+
+      {showList && (
+        <div className="space-y-1">
+          <button onClick={async () => {
+            setPrepulling(true); setPrepullMsg('Pre-pulling image on all nodes…')
+            try {
+              const r = await api.post<{message: string}>(`/clusters/${clusterName}/prepull`, {})
+              setPrepullMsg('✓ ' + r.message)
+            } catch { setPrepullMsg('Pre-pull failed') }
+            finally { setPrepulling(false) }
+          }} disabled={prepulling}
+            className="text-[9px] font-mono text-text-muted hover:text-accent-cyan transition-colors">
+            {prepulling ? '⏳ Pre-pulling fio image on all nodes…' : '⬇ Pre-pull fio image on all nodes'}
+          </button>
+          {prepullMsg && <p className="text-[9px] font-mono text-text-muted">{prepullMsg}</p>}
+        </div>
       )}
     </div>
 

@@ -726,6 +726,71 @@ async def stream_pod_logs(
         yield line
 
 
+def _sync_prepull_images(kubeconfig_url: str) -> str:
+    """Create a DaemonSet on all workers to pre-pull the fio image, wait, delete. Returns status."""
+    from kubernetes import client as _k8s
+    core, _, _cfg, api_client = _sync_load_k8s(kubeconfig_url)
+    apps_v1 = _k8s.AppsV1Api(api_client)
+    ns = "jenease-prepull"
+    ds_name = "jenease-prepull-fio"
+    try:
+        core.create_namespace(_k8s.V1Namespace(metadata=_k8s.V1ObjectMeta(name=ns)))
+    except Exception:
+        pass
+    # Delete any existing DaemonSet first
+    try:
+        apps_v1.delete_namespaced_daemon_set(ds_name, ns)
+        time.sleep(3)
+    except Exception:
+        pass
+    ds = _k8s.V1DaemonSet(
+        metadata=_k8s.V1ObjectMeta(name=ds_name, namespace=ns),
+        spec=_k8s.V1DaemonSetSpec(
+            selector=_k8s.V1LabelSelector(match_labels={"app": ds_name}),
+            template=_k8s.V1PodTemplateSpec(
+                metadata=_k8s.V1ObjectMeta(labels={"app": ds_name}),
+                spec=_k8s.V1PodSpec(
+                    tolerations=[_k8s.V1Toleration(operator="Exists")],
+                    containers=[_k8s.V1Container(
+                        name="prepull",
+                        image=IO_IMAGE,
+                        command=["sh", "-c", "echo pulled && sleep 5"],
+                        image_pull_policy="Always",
+                    )],
+                    restart_policy="Always",
+                    node_selector={"node-role.kubernetes.io/worker": ""},
+                ),
+            ),
+        ),
+    )
+    apps_v1.create_namespaced_daemon_set(ns, ds)
+    # Wait up to 5 min for all pods to be Running/Succeeded
+    for _ in range(60):
+        time.sleep(5)
+        try:
+            status = apps_v1.read_namespaced_daemon_set_status(ds_name, ns)
+            desired = status.status.desired_number_scheduled or 0
+            ready = status.status.number_ready or 0
+            if desired > 0 and ready >= desired:
+                break
+        except Exception:
+            pass
+    # Cleanup
+    try:
+        apps_v1.delete_namespaced_daemon_set(ds_name, ns, body=_k8s.V1DeleteOptions(propagation_policy="Background"))
+    except Exception:
+        pass
+    return f"Image pre-pulled on {ready}/{desired} nodes"
+
+
+async def prepull_workload_image(kubeconfig_url: str) -> str:
+    loop = asyncio.get_event_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, _sync_prepull_images, kubeconfig_url),
+        timeout=360.0,
+    )
+
+
 def parse_fio_line(line: str, size_bytes: int = 0) -> dict:
     """Extract progress %, IO rate, and ETA from a fio status line (TTY or non-TTY format)."""
     result: dict = {"line": line}

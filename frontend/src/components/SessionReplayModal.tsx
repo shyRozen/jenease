@@ -156,13 +156,20 @@ export default function SessionReplayModal({ session, onClose }: { session: Sess
         </div>
 
         {/* Debug info — remove once confirmed working */}
-        <div className="px-5 pt-2 text-[9px] font-mono text-text-muted flex gap-4">
-          <span>samples: {session.throughput.length}</span>
-          <span>totalMs: {totalMs}</span>
-          <span>currentMs: {currentMs}</span>
-          <span>visible: {displayData.length}</span>
-          <span>maxMBs: {Math.max(0, ...displayData.map(d => d.total)).toFixed(0)}</span>
-        </div>
+        {(() => {
+          const firstSample = session.throughput[0]
+          const firstNonZero = session.throughput.find(t => t.total > 0)
+          return (
+            <div className="px-5 pt-2 text-[9px] font-mono text-text-muted flex gap-3 flex-wrap">
+              <span className={playing ? 'text-accent-green' : ''}>playing: {playing ? 'YES' : 'no'}</span>
+              <span>cur: {Math.round(currentMs)}ms</span>
+              <span>total: {totalMs}ms</span>
+              <span>visible: {displayData.length}</span>
+              <span>first@: {firstSample?.offset_ms ?? '—'}ms</span>
+              <span>IO@: {firstNonZero?.offset_ms ?? '—'}ms ({firstNonZero ? `${firstNonZero.total.toFixed(0)}MB/s` : 'none'})</span>
+            </div>
+          )
+        })()}
 
         {/* Chart */}
         <div className="px-5 pt-2 pb-2">

@@ -60,6 +60,7 @@ export default function ThroughputChart({
   title,
   height,
   containerWidth,
+  fixedMax,
 }: {
   data: DataPoint[]
   visibleSecs?: number
@@ -68,6 +69,7 @@ export default function ThroughputChart({
   title?: string
   height?: number
   containerWidth?: number  // if provided, skip internal ResizeObserver
+  fixedMax?: number        // if provided, use this as Y-axis max (shared across charts)
 }) {
   const VISIBLE  = visibleSecs ?? VISIBLE_SECS
   const CHEIGHT  = height ?? CHART_H
@@ -107,10 +109,15 @@ export default function ThroughputChart({
 
   const visible = data.filter(d => d.ts >= startMs - 2000 && d.ts <= endMs + 2000)
 
-  const maxVal = niceMax(Math.max(
-    ...data.slice(-300).flatMap(d => activeSeries.map(s => d[s.key] ?? 0)),
-    1
-  ))
+  // Y-axis max: use fixedMax when provided (shared across a group of charts),
+  // otherwise auto-scale from the visible window so spikes self-correct quickly.
+  const maxVal = fixedMax != null
+    ? fixedMax
+    : niceMax(Math.max(
+        ...data.slice(-Math.max(visible.length + 6, 12))
+          .flatMap(d => activeSeries.map(s => d[s.key] ?? 0)),
+        1
+      ))
 
   function makePath(key: string) {
     const pts = visible.map(d =>

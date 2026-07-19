@@ -280,14 +280,22 @@ def _fetch_ceph_metrics_direct(api_client, cfg, cache_suffix: str = 'iops') -> d
     prev_data = prev['data']
     pool_map  = pool_id_to_type or prev.get('pool_map', {})
 
+    # Hard ceiling: 5 GB/s per OSD or pool. Anything above is a bad delta
+    # (counter reset, first-sample artifact, or corrupt reading).
+    _MAX_MB_S = 5000.0
+
     def delta_rate(metric: str) -> list:
         idx = {tuple(sorted(pl.items())): pv for pl, pv in prev_data.get(metric, [])}
         out = []
         for labels, cv in all_cur.get(metric, []):
             pv = idx.get(tuple(sorted(labels.items())))
             if pv is not None:
-                out.append((labels, max(0.0, cv - pv) / dt))
+                rate = max(0.0, cv - pv) / dt
+                out.append((labels, rate))
         return out
+
+    def mb_s(rate_bytes: float) -> float:
+        return round(min(rate_bytes / 1_048_576, _MAX_MB_S), 3)
 
     osd_throughput_mb:  dict = {}
     pool_throughput_mb: dict = {}
@@ -303,27 +311,27 @@ def _fetch_ceph_metrics_direct(api_client, cfg, cache_suffix: str = 'iops') -> d
         if d.startswith('osd.'):
             osd_status.setdefault(int(d.split('.')[1]), {})['in'] = int(val)
 
-    # Per-OSD bytes → MB/s (from ceph-exporter)
+    # Per-OSD bytes → MB/s capped at 5 GB/s (from ceph-exporter)
     for labels, rate in delta_rate('ceph_osd_op_r_out_bytes'):
         d = labels.get('ceph_daemon', '')
         if d.startswith('osd.'):
-            osd_throughput_mb.setdefault(int(d.split('.')[1]), {})['r'] = round(rate / 1_048_576, 3)
+            osd_throughput_mb.setdefault(int(d.split('.')[1]), {})['r'] = mb_s(rate)
     for labels, rate in delta_rate('ceph_osd_op_w_in_bytes'):
         d = labels.get('ceph_daemon', '')
         if d.startswith('osd.'):
-            osd_throughput_mb.setdefault(int(d.split('.')[1]), {})['w'] = round(rate / 1_048_576, 3)
+            osd_throughput_mb.setdefault(int(d.split('.')[1]), {})['w'] = mb_s(rate)
 
-    # Pool bytes → MB/s joined with pool name via pool_id (from mgr)
+    # Pool bytes → MB/s capped (from mgr)
     for labels, rate in delta_rate('ceph_pool_rd_bytes'):
         wt = pool_map.get(labels.get('pool_id', ''))
         if wt:
             pool_throughput_mb.setdefault(wt, {'r': 0.0, 'w': 0.0})
-            pool_throughput_mb[wt]['r'] = round(pool_throughput_mb[wt]['r'] + rate / 1_048_576, 3)
+            pool_throughput_mb[wt]['r'] = round(min(pool_throughput_mb[wt]['r'] + mb_s(rate), _MAX_MB_S), 3)
     for labels, rate in delta_rate('ceph_pool_wr_bytes'):
         wt = pool_map.get(labels.get('pool_id', ''))
         if wt:
             pool_throughput_mb.setdefault(wt, {'r': 0.0, 'w': 0.0})
-            pool_throughput_mb[wt]['w'] = round(pool_throughput_mb[wt]['w'] + rate / 1_048_576, 3)
+            pool_throughput_mb[wt]['w'] = round(min(pool_throughput_mb[wt]['w'] + mb_s(rate), _MAX_MB_S), 3)
 
     result: dict = {}
     if osd_throughput_mb:  result['osd_throughput_mb']  = osd_throughput_mb

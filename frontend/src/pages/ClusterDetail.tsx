@@ -223,8 +223,15 @@ function OsdGrid({ count, up, osdSize, capacity, iops, osdStatus }: {
   iops?: Record<string, { r?: number; w?: number }>
   osdStatus?: Record<string, { up?: number; in?: number }>
 }) {
-  const perOsdBytes = capacity?.bytes_total ? capacity.bytes_total / count : 0
-  const perOsdUsed = capacity?.bytes_used ? capacity.bytes_used / count : 0
+  // Use actual OSD IDs from ceph_osd_up metric when available — always reflects the real
+  // cluster state (including newly added OSDs) without waiting for health pod counting.
+  const osdIds: number[] = osdStatus && Object.keys(osdStatus).length > 0
+    ? Object.keys(osdStatus).map(Number).sort((a, b) => a - b)
+    : Array.from({ length: count }, (_, i) => i)
+
+  const effectiveCount = osdIds.length || count
+  const perOsdBytes = capacity?.bytes_total ? capacity.bytes_total / effectiveCount : 0
+  const perOsdUsed  = capacity?.bytes_used  ? capacity.bytes_used  / effectiveCount : 0
   const usedPct = perOsdBytes ? Math.round((perOsdUsed / perOsdBytes) * 100) : 0
   const barColor = usedPct > 85 ? 'bg-accent-red' : usedPct > 70 ? 'bg-accent-amber' : 'bg-accent-green'
 
@@ -232,8 +239,7 @@ function OsdGrid({ count, up, osdSize, capacity, iops, osdStatus }: {
     <div>
       <p className="text-[9px] font-mono text-text-muted uppercase tracking-widest mb-2">OSDs</p>
       <div className="flex flex-wrap gap-2">
-        {Array.from({ length: count }).map((_, i) => {
-          // Use per-OSD status from mgr if available, otherwise fall back to count heuristic
+        {osdIds.map(i => {
           const status = osdStatus?.[String(i)]
           const isUp   = status ? status.up === 1 : (up <= 0 || i < up)
           const isIn   = status ? status.in === 1 : true
@@ -652,15 +658,31 @@ export default function ClusterDetail() {
                       </div>
                     </div>
 
-                    {/* Per OSD mode: per-OSD R/W charts, 3 per row, all same width */}
+                    {/* Per OSD mode: per-OSD R/W charts, 3 per row, shared Y-axis max */}
                     {osdMode === 'osd' && (() => {
                       const GAP = 8, COLS = 3
                       const cw = osdGridWidth > 0
                         ? Math.floor((osdGridWidth - GAP * (COLS - 1)) / COLS)
                         : undefined
+                      // Compute shared Y-axis max across all OSD histories,
+                      // using only the visible 60s window so it tracks current activity.
+                      const allEntries = Object.entries(osdHistoryRef.current)
+                      const windowMs = 60_000
+                      const globalMax = Math.max(1, ...allEntries.flatMap(([, hist]) => {
+                        if (hist.length === 0) return [0]
+                        const lastTs = hist[hist.length - 1].ts
+                        return hist
+                          .filter(d => d.ts >= lastTs - windowMs - 2000)
+                          .flatMap(d => [d['r'] ?? 0, d['w'] ?? 0])
+                      }))
+                      const sharedMax = globalMax <= 0 ? 10
+                        : (() => {
+                            const mag = Math.pow(10, Math.floor(Math.log10(globalMax)))
+                            return Math.ceil(globalMax / mag) * mag
+                          })()
                       return (
                         <div ref={osdGridRef} className="grid grid-cols-3 gap-2">
-                          {Object.entries(osdHistoryRef.current)
+                          {allEntries
                             .sort(([a], [b]) => Number(a) - Number(b))
                             .map(([osd, hist]) => (
                               <ThroughputChart
@@ -672,6 +694,7 @@ export default function ClusterDetail() {
                                 height={140}
                                 containerWidth={cw}
                                 visibleSecs={60}
+                                fixedMax={sharedMax}
                               />
                             ))}
                         </div>

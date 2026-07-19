@@ -122,11 +122,36 @@ function OsdCapacityBar({ capacity, clusterName, kubeconfigUrl }: {
   kubeconfigUrl?: string
 }) {
   const { bytes_total, bytes_used, bytes_available } = capacity
-  const [trimming, setTrimming] = useState(false)
-  const [trimMsg, setTrimMsg] = useState('')
+  const [trimming,   setTrimming]   = useState(false)
+  const [trimMsg,    setTrimMsg]    = useState('')
+  const [cleaning,   setCleaning]   = useState(false)
+  const [cleanMsg,   setCleanMsg]   = useState('')
   if (!bytes_total) return null
   const usedPct = Math.round((bytes_used / bytes_total) * 100)
   const color = usedPct > 85 ? 'bg-accent-red' : usedPct > 70 ? 'bg-accent-amber' : 'bg-accent-cyan'
+
+  async function handleCleanOrphans() {
+    if (!kubeconfigUrl) { setCleanMsg('⚠ Kubeconfig URL not available yet'); return }
+    setCleaning(true)
+    setCleanMsg('')
+    try {
+      const url = `/api/clusters/${clusterName}/cleanup-orphans?kubeconfig_url=${encodeURIComponent(kubeconfigUrl)}`
+      const res  = await fetch(url, { method: 'POST', credentials: 'include' })
+      const text = await res.text()
+      let data: any = {}
+      try { data = JSON.parse(text) } catch { /* non-JSON */ }
+      if (!res.ok) {
+        setCleanMsg(`⚠ ${data.detail ?? text.slice(0, 80)}`)
+      } else {
+        const n = data.cleaned?.length ?? 0
+        setCleanMsg(n === 0 ? '✓ No orphans found' : `✓ Cleaned ${n} namespace${n !== 1 ? 's' : ''}`)
+      }
+    } catch (e: any) {
+      setCleanMsg(`⚠ ${e?.message ?? 'Request failed'}`)
+    } finally {
+      setCleaning(false)
+    }
+  }
 
   async function handleTrim() {
     if (!kubeconfigUrl) { setTrimMsg('⚠ Kubeconfig URL not available yet'); return }
@@ -165,17 +190,26 @@ function OsdCapacityBar({ capacity, clusterName, kubeconfigUrl }: {
         />
       </div>
       <div className="flex items-center justify-between text-[10px] font-mono">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="text-text-secondary">Used <span className="text-text-primary">{fmtBytes(bytes_used)}</span></span>
           <button
             onClick={handleTrim}
             disabled={trimming}
-            title="Run fstrim on all worker nodes — releases discarded blocks back to thin-provisioned storage (vSphere/cloud)"
+            title="Run fstrim on all worker nodes — releases discarded blocks to thin-provisioned storage (vSphere/cloud)"
             className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-surface-4 text-text-muted hover:border-accent-amber/50 hover:text-accent-amber transition-colors disabled:opacity-50"
           >
             {trimming ? '⏳' : '⟳ Trim'}
           </button>
-          {trimMsg && <span className="text-[9px] font-mono text-text-muted">{trimMsg}</span>}
+          <button
+            onClick={handleCleanOrphans}
+            disabled={cleaning}
+            title="Delete leftover jenease-wl-* namespaces (pods → PVCs → PV check → namespace)"
+            className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-surface-4 text-text-muted hover:border-accent-red/50 hover:text-accent-red transition-colors disabled:opacity-50"
+          >
+            {cleaning ? '⏳' : '🗑 Clean WL'}
+          </button>
+          {trimMsg  && <span className="text-[9px] font-mono text-text-muted">{trimMsg}</span>}
+          {cleanMsg && <span className="text-[9px] font-mono text-accent-red/80">{cleanMsg}</span>}
         </div>
         <span className="text-text-secondary">Free <span className="text-text-primary">{fmtBytes(bytes_available)}</span></span>
         <span className="text-text-secondary">Total <span className="text-text-primary">{fmtBytes(bytes_total)}</span></span>

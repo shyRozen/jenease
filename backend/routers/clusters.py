@@ -610,6 +610,120 @@ async def fstrim_storage(
     return {"ok": True, "output": result}
 
 
+def _cleanup_orphan_wl_namespaces(kubeconfig_url: str) -> dict:
+    """Gently clean up leftover jenease-wl-* namespaces:
+    delete pods → delete PVCs → unblock stuck PVs → delete namespace."""
+    from workload_runner import _sync_load_k8s
+    from kubernetes import client as _k8s
+    import time as _time
+
+    core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
+    cleaned: list[str] = []
+    skipped: list[str] = []
+    errors: list[str] = []
+
+    try:
+        all_ns = core.list_namespace()
+        wl_ns = [n.metadata.name for n in all_ns.items
+                 if n.metadata.name.startswith('jenease-wl-')]
+
+        if not wl_ns:
+            return {"cleaned": [], "skipped": [], "errors": [], "message": "No leftover jenease-wl-* namespaces found"}
+
+        for ns_name in wl_ns:
+            try:
+                # 1. Force-delete all pods (grace period 0)
+                try:
+                    pods = core.list_namespaced_pod(ns_name)
+                    for pod in pods.items:
+                        try:
+                            core.delete_namespaced_pod(
+                                pod.metadata.name, ns_name,
+                                body=_k8s.V1DeleteOptions(grace_period_seconds=0),
+                            )
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # 2. Collect PV names before deleting PVCs
+                pv_names: list[str] = []
+                try:
+                    pvcs = core.list_namespaced_persistent_volume_claim(ns_name)
+                    for pvc in pvcs.items:
+                        if pvc.spec.volume_name:
+                            pv_names.append(pvc.spec.volume_name)
+                        try:
+                            core.delete_namespaced_persistent_volume_claim(
+                                pvc.metadata.name, ns_name,
+                                body=_k8s.V1DeleteOptions(grace_period_seconds=0),
+                            )
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # 3. Wait briefly then check for stuck PVs — remove finalizers if needed
+                _time.sleep(3)
+                for pv_name in pv_names:
+                    try:
+                        pv = core.read_persistent_volume(pv_name)
+                        if pv.metadata.finalizers:
+                            core.patch_persistent_volume(
+                                pv_name,
+                                {"metadata": {"finalizers": None}},
+                            )
+                    except Exception:
+                        pass
+
+                # 4. Delete namespace (remove stuck finalizers if needed)
+                try:
+                    core.delete_namespace(ns_name)
+                except Exception:
+                    pass
+                # Patch out namespace finalizers if it gets stuck
+                _time.sleep(2)
+                try:
+                    ns_obj = core.read_namespace(ns_name)
+                    if ns_obj.metadata.finalizers:
+                        core.patch_namespace(
+                            ns_name,
+                            {"metadata": {"finalizers": None},
+                             "spec": {"finalizers": []}},
+                        )
+                except Exception:
+                    pass
+
+                cleaned.append(ns_name)
+            except Exception as e:
+                errors.append(f"{ns_name}: {e}")
+
+        return {
+            "cleaned": cleaned,
+            "skipped": skipped,
+            "errors": errors,
+            "message": f"Cleaned {len(cleaned)} namespace(s)"
+            + (f", {len(errors)} error(s)" if errors else ""),
+        }
+    finally:
+        api_client.close()
+
+
+@router.post("/{cluster_name}/cleanup-orphans")
+async def cleanup_orphan_namespaces(
+    cluster_name: str,
+    kubeconfig_url: str,
+    session: dict = Depends(get_session),
+):
+    """Delete leftover jenease-wl-* namespaces: pods → PVCs → PV finalizer check → namespace."""
+    loop = asyncio.get_event_loop()
+    result = await asyncio.wait_for(
+        loop.run_in_executor(None, _cleanup_orphan_wl_namespaces, kubeconfig_url),
+        timeout=300.0,
+    )
+    return result
+
+
 @router.post("/{cluster_name}/prepull")
 async def prepull_images(
     cluster_name: str,

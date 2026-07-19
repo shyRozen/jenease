@@ -59,11 +59,13 @@ function WorkloadCard({
   clusterName,
   onDelete,
   onRateUpdate,
+  autoDelete = false,
 }: {
   workload: WorkloadEntry
   clusterName: string
   onDelete: () => void
   onRateUpdate?: (id: number, rateMb: number | null) => void
+  autoDelete?: boolean
 }) {
   const [logs, setLogs]           = useState<string[]>([])
   const [progress, setProgress]   = useState<number | null>(null)
@@ -74,16 +76,22 @@ function WorkloadCard({
   const logRef = useRef<HTMLDivElement>(null)
   const esRef  = useRef<EventSource | null>(null)
 
-  const isActive = workload.phase === 'Running' || workload.phase === 'Pending'
+  const ageMs = Date.now() - new Date(workload.created_at).getTime()
+  const isActive = workload.phase === 'Running' || workload.phase === 'Pending' ||
+    (workload.phase === 'Unknown' && ageMs < 10 * 60 * 1000)
 
   useEffect(() => {
     if (!isActive || cleaning) return
     const es = new EventSource(`/api/clusters/${clusterName}/workloads/${workload.id}/logs`, { withCredentials: true })
     esRef.current = es
+    const streamStart = Date.now()
 
     es.onmessage = (e) => {
       const data = JSON.parse(e.data)
-      if (data.line) setLogs(prev => [...prev, data.line].slice(-150))
+      if (data.line) {
+        const elapsed = ((Date.now() - streamStart) / 1000).toFixed(1)
+        setLogs(prev => [...prev, `[+${elapsed}s] ${data.line}`].slice(-150))
+      }
       if (data.progress != null) setProgress(data.progress)
       if (data.eta)              setEta(data.eta)
       if (data.rate) {
@@ -106,29 +114,29 @@ function WorkloadCard({
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }, [logs])
 
-  async function handleDelete() {
-    if (!confirmDelete) { setConfirmDelete(true); return }
-
+  function triggerCleanup() {
+    if (cleaning) return
     onRateUpdate?.(workload.id, null)
-    // Close existing log stream and switch to cleanup SSE in the terminal
-    // (cleanup SSE handles both k8s deletion and DB record removal)
     esRef.current?.close()
     setCleaning(true)
     setLogs(prev => [...prev, '[jenease] Starting cleanup…'])
     setProgress(null)
-
     const es = new EventSource(`/api/clusters/${clusterName}/workloads/${workload.id}/cleanup`, { withCredentials: true })
     esRef.current = es
-
     es.onmessage = (e) => {
       const data = JSON.parse(e.data)
       if (data.line) setLogs(prev => [...prev, data.line].slice(-150))
-      if (data.done) {
-        es.close()
-        setTimeout(() => onDelete(), 800)
-      }
+      if (data.done) { es.close(); setTimeout(() => onDelete(), 800) }
     }
     es.onerror = () => { es.close(); setTimeout(() => onDelete(), 1000) }
+  }
+
+  // Trigger cleanup automatically when parent requests clear-all
+  useEffect(() => { if (autoDelete) triggerCleanup() }, [autoDelete])
+
+  async function handleDelete() {
+    if (!confirmDelete) { setConfirmDelete(true); return }
+    triggerCleanup()
   }
 
   const age = (() => {
@@ -216,11 +224,13 @@ function WorkloadCard({
 
 export default function WorkloadPanel({
   clusterName,
+  kubeconfigUrl,
   showLauncher = true,
   showList = true,
   sharedRatesRef,
 }: {
   clusterName: string
+  kubeconfigUrl?: string
   showLauncher?: boolean
   showList?: boolean
   sharedRatesRef?: React.MutableRefObject<Record<number, number>>
@@ -255,6 +265,7 @@ export default function WorkloadPanel({
   const [seqItems,    setSeqItems]    = useState<SeqItem[]>([])
   const [seqName,     setSeqName]     = useState('')
   const [seqRecord,   setSeqRecord]   = useState(false)
+  const [seqSync,     setSeqSync]     = useState(false)
   const [seqRunning,  setSeqRunning]  = useState(false)
   const [seqCounter,  setSeqCounter]  = useState(0)   // local id generator
   const [showAllSeqs, setShowAllSeqs] = useState(false)
@@ -264,7 +275,20 @@ export default function WorkloadPanel({
     staleTime: 30_000,
   })
 
+  const { data: imageStatus, refetch: refetchImageStatus } = useQuery<{
+    nodes: { name: string; fio: boolean; noobaa: boolean }[]
+    all_cached: boolean
+  }>({
+    queryKey: ['image-status', clusterName],
+    queryFn: () => api.get(`/clusters/${clusterName}/image-status`),
+    staleTime: 60_000,
+    refetchInterval: 90_000,
+    enabled: showLauncher,
+  })
+
   const [purging, setPurging] = useState(false)
+  const [clearAll, setClearAll] = useState(false)
+  const [confirmClearAll, setConfirmClearAll] = useState(false)
   const [prepulling, setPrepulling] = useState(false)
   const [prepullMsg, setPrepullMsg] = useState('')
   const [rates, setRates] = useState<Record<number, number>>({})
@@ -341,6 +365,16 @@ export default function WorkloadPanel({
     queryFn: () => api.get(`/clusters/${clusterName}/workloads`),
     refetchInterval: 10_000,
   })
+
+  const activeWorkloads = workloads.filter(w => w.phase === 'Running' || w.phase === 'Pending')
+  // Reset clearAll once all workloads have been removed
+  useEffect(() => { if (clearAll && workloads.length === 0) setClearAll(false) }, [clearAll, workloads.length])
+  const { data: healthData } = useQuery<{ ceph_capacity?: { health?: string }; degraded_reason?: string; status?: string }>({
+    queryKey: ['health', clusterName],
+    queryFn: () => api.get(`/clusters/${clusterName}/health`),
+    refetchInterval: 2_000,
+    enabled: showList && workloads.length > 0,
+  })
   workloadsRef.current = workloads
 
   async function handlePurge() {
@@ -371,6 +405,7 @@ export default function WorkloadPanel({
         engine,
         direct,
         session_id: recordingId,
+        kubeconfig_url: kubeconfigUrl,
       })
       await refetch()
     } catch (e: any) {
@@ -422,23 +457,48 @@ export default function WorkloadPanel({
     if (!deployFull) return
     setDeploying(true)
     const events = [...deployFull.events].sort((a, b) => a.offset_ms - b.offset_ms)
+    // Track launched workload IDs by type for delete event matching (FIFO per type)
+    const launched: Record<string, number[]> = {}
     for (const e of events) {
       const delay = e.offset_ms
-      setTimeout(() => {
-        api.post(`/clusters/${clusterName}/workloads`, {
-          workload_type: e.workload_type,
-          size_gb: e.size_gb,
-          mode: e.mode,
-          pattern: e.pattern,
-          block_size: e.block_size,
-          num_jobs: e.num_jobs,
-          iodepth: e.iodepth,
-          duration_sec: e.duration_sec,
-          obj_size_mb: e.obj_size_mb,
-          workers: e.workers,
-          session_id: null,
-        }).then(() => refetch()).catch(() => {})
-      }, delay)
+      if ((e as any).type === 'delete') {
+        setTimeout(async () => {
+          // Find oldest running workload of this type and clean it up
+          const queue = launched[(e as any).workload_type] || []
+          const wid = queue.shift()
+          if (wid) {
+            const es = new EventSource(
+              `/api/clusters/${clusterName}/workloads/${wid}/cleanup`,
+              { withCredentials: true }
+            )
+            es.onmessage = (ev) => { try { if (JSON.parse(ev.data).done) { es.close(); refetch() } } catch {} }
+            es.onerror = () => { es.close(); refetch() }
+          }
+        }, delay)
+      } else {
+        setTimeout(() => {
+          api.post(`/clusters/${clusterName}/workloads`, {
+            workload_type: e.workload_type,
+            size_gb: e.size_gb,
+            mode: e.mode,
+            pattern: e.pattern,
+            block_size: e.block_size,
+            num_jobs: e.num_jobs,
+            iodepth: e.iodepth,
+            duration_sec: e.duration_sec,
+            obj_size_mb: e.obj_size_mb,
+            workers: e.workers,
+            session_id: null,
+            kubeconfig_url: kubeconfigUrl,
+          }).then((res: any) => {
+            if (res?.id) {
+              const t = e.workload_type
+              launched[t] = [...(launched[t] || []), res.id]
+            }
+            refetch()
+          }).catch(() => {})
+        }, delay)
+      }
     }
     setDeploying(false)
     setDeploySession(null)
@@ -483,20 +543,42 @@ export default function WorkloadPanel({
   async function handleRunSequence() {
     if (seqItems.length === 0) return
     setSeqRunning(true)
-    let sessionId: number | null = null
+
+    // Start recording FIRST — before any workload is initiated
+    // If seqRecord is checked, create a new session; otherwise fall back to any active manual recording
+    let sessionId: number | null = recordingId
     if (seqRecord) {
       try {
-        const res = await api.post<{ id: number; name: string }>('/sessions/', { cluster_name: clusterName })
-        sessionId = res.id; setRecordingId(res.id); setRecordingStart(Date.now()); setRecordingElapsed(0)
+        const name = seqSync ? `[sync] ${clusterName}` : clusterName
+        const res = await api.post<{ id: number; name: string }>('/sessions/', { cluster_name: name })
+        sessionId = res.id
+        setRecordingId(res.id)
+        setRecordingStart(Date.now())
+        setRecordingElapsed(0)
       } catch { /* best-effort */ }
     }
-    const t0 = Date.now()
-    for (const item of [...seqItems].sort((a, b) => a.offset_sec - b.offset_sec)) {
-      const delay = item.offset_sec * 1000 - (Date.now() - t0)
-      await new Promise(r => setTimeout(r, Math.max(0, delay)))
-      api.post(`/clusters/${clusterName}/workloads`, { ...item, session_id: sessionId })
-        .then(() => refetch())
-        .catch((e: any) => console.error(`[sequence] ${item.workload_type} failed:`, e?.message))
+
+    if (seqSync) {
+      // Synchronized mode — create all pods first, then fire IO simultaneously
+      try {
+        await api.post(`/clusters/${clusterName}/workloads/sync-launch`, {
+          workloads: seqItems.map(({ id: _id, ...rest }) => rest),
+          session_id: sessionId,
+          kubeconfig_url: kubeconfigUrl,
+        })
+        await refetch()
+      } catch (e: any) {
+        console.error('[sequence sync] failed:', e?.message)
+      }
+    } else {
+      const t0 = Date.now()
+      for (const item of [...seqItems].sort((a, b) => a.offset_sec - b.offset_sec)) {
+        const delay = item.offset_sec * 1000 - (Date.now() - t0)
+        await new Promise(r => setTimeout(r, Math.max(0, delay)))
+        api.post(`/clusters/${clusterName}/workloads`, { ...item, session_id: sessionId, kubeconfig_url: kubeconfigUrl })
+          .then(() => refetch())
+          .catch((e: any) => console.error(`[sequence] ${item.workload_type} failed:`, e?.message))
+      }
     }
     setSeqRunning(false)
   }
@@ -546,6 +628,63 @@ export default function WorkloadPanel({
 
       {/* Launcher */}
       {showLauncher && <div className="border border-surface-4 rounded-lg p-3 space-y-2.5 bg-surface-2/30">
+        {/* Image cache status + pre-pull */}
+        {imageStatus && (
+          <div className="pb-1 border-b border-surface-4 space-y-1.5">
+            <div className="flex items-center gap-2">
+              <span className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Images</span>
+              <button onClick={() => refetchImageStatus()} className="text-[9px] font-mono text-text-muted hover:text-accent-cyan transition-colors">↻</button>
+              <div className="flex gap-1.5">
+                {imageStatus.nodes.map(node => (
+                  <div key={node.name} className="relative group cursor-default">
+                    <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${
+                      node.fio && node.noobaa
+                        ? 'bg-accent-green/10 text-accent-green'
+                        : node.fio || node.noobaa
+                          ? 'bg-yellow-500/10 text-yellow-400'
+                          : 'bg-accent-red/10 text-accent-red'
+                    }`}>
+                      {node.name} {node.fio && node.noobaa ? '✓' : '⚠'}
+                    </span>
+                    <div className="absolute bottom-full left-0 mb-1 hidden group-hover:block z-20
+                      bg-surface-3 border border-border rounded p-1.5 text-[8px] font-mono whitespace-nowrap shadow-lg">
+                      <div className={node.fio ? 'text-accent-green' : 'text-accent-red'}>
+                        {node.fio ? '✓' : '✗'} quay.io/ocsci/nginx:latest
+                      </div>
+                      <div className={node.noobaa ? 'text-accent-green' : 'text-accent-red'}>
+                        {node.noobaa ? '✓' : '✗'} ubi9/python-311:latest
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            {!imageStatus.all_cached && (
+              <div className="flex items-center gap-2">
+                <button onClick={async () => {
+                  setPrepulling(true); setPrepullMsg('')
+                  try {
+                    await api.post(`/clusters/${clusterName}/prepull`, {})
+                    setPrepullMsg('⏳ Pulling… status updates automatically')
+                    const poll = setInterval(() => refetchImageStatus(), 30_000)
+                    setTimeout(() => {
+                      clearInterval(poll)
+                      refetchImageStatus().then(r => {
+                        const allDone = r.data?.all_cached
+                        setPrepullMsg(allDone ? '✓ All nodes cached' : '⚠ Some nodes still missing — try again')
+                      })
+                    }, 6 * 60 * 1000)
+                  } catch { setPrepullMsg('Pre-pull failed') }
+                  finally { setPrepulling(false) }
+                }} disabled={prepulling}
+                  className="text-[9px] font-mono text-accent-cyan hover:text-accent-cyan/80 transition-colors">
+                  {prepulling ? '⏳ Starting…' : '⬇ Pre-pull missing images'}
+                </button>
+                {prepullMsg && <span className="text-[9px] font-mono text-text-muted">{prepullMsg}</span>}
+              </div>
+            )}
+          </div>
+        )}
         {/* Type */}
         <div className="space-y-1">
           <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Type</p>
@@ -725,6 +864,12 @@ export default function WorkloadPanel({
             <span className="text-[10px] font-mono text-text-muted">Start recording with sequence</span>
           </label>
 
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={seqSync} onChange={e => setSeqSync(e.target.checked)}
+              className="accent-accent-cyan" />
+            <span className="text-[10px] font-mono text-text-muted">⚡ Sync IO start — create all pods first, then fire simultaneously</span>
+          </label>
+
           <div className="flex gap-1.5">
             <button onClick={handleRunSequence} disabled={seqRunning}
               className="flex-1 text-[10px] font-mono py-1 rounded border border-accent-green/40 text-accent-green hover:bg-accent-green/10 transition-colors disabled:opacity-50">
@@ -844,12 +989,15 @@ export default function WorkloadPanel({
                 <div className="border border-accent-green/30 rounded p-2 space-y-2 bg-surface-3/50">
                   <p className="text-[9px] font-mono text-accent-green uppercase tracking-wider">Deploy to: {clusterName}</p>
                   <div className="space-y-0.5">
-                    {deployFull.events.map((e: SessionEvent, i: number) => (
-                      <p key={i} className="text-[9px] font-mono text-text-secondary">
-                        +{(e.offset_ms / 1000).toFixed(0)}s · {e.workload_type.toUpperCase()} · {e.size_gb}GB · {e.mode}
-                        {e.workload_type !== 'noobaa' ? ` · bs=${e.block_size} j=${e.num_jobs}` : ` · ${e.obj_size_mb}MB obj`}
-                      </p>
-                    ))}
+                    {deployFull.events.map((e: SessionEvent, i: number) => {
+                      const isDel = (e as any).type === 'delete'
+                      return (
+                        <p key={i} className={`text-[9px] font-mono ${isDel ? 'text-accent-red' : 'text-text-secondary'}`}>
+                          {isDel ? '✕' : '▸'} +{(e.offset_ms / 1000).toFixed(0)}s · {e.workload_type.toUpperCase()}
+                          {isDel ? ' deleted' : ` · ${e.size_gb}GB · ${e.mode}${e.workload_type !== 'noobaa' ? ` · bs=${e.block_size ?? '1m'} j=${e.num_jobs ?? 4}` : ` · ${e.obj_size_mb ?? 64}MB obj`}`}
+                        </p>
+                      )
+                    })}
                   </div>
                   <p className="text-[9px] font-mono text-text-muted">
                     Total duration: {fmtDuration(deployFull.duration_ms)}
@@ -875,6 +1023,21 @@ export default function WorkloadPanel({
       {showList && (
         <ThroughputChart data={history} />
       )}
+
+      {showList && activeWorkloads.length > 0 && (() => {
+        const ceph = healthData?.ceph_capacity?.health
+        if (!ceph) return null
+        const isOk = ceph === 'HEALTH_OK'
+        const isWarn = ceph === 'HEALTH_WARN'
+        const color = isOk ? 'text-accent-green' : isWarn ? 'text-yellow-400' : 'text-accent-red'
+        const dot   = isOk ? 'bg-accent-green' : isWarn ? 'bg-yellow-400' : 'bg-accent-red'
+        return (
+          <div className={`flex items-center gap-1.5 text-[9px] font-mono ${color}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${dot} ${isOk ? '' : 'animate-pulse'}`} />
+            <span>CEPH {ceph}{healthData?.degraded_reason && !isOk ? ` · ${healthData.degraded_reason}` : ''}</span>
+          </div>
+        )
+      })()}
 
       {showList && workloads.length > 0 && (() => {
         const byType: Record<string, number> = {}
@@ -908,11 +1071,42 @@ export default function WorkloadPanel({
 
       {showList && workloads.length > 0 && (
         <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-[9px] font-mono text-text-muted">{workloads.length} workload{workloads.length !== 1 ? 's' : ''}</p>
+            <div className="flex items-center gap-2">
+              {confirmClearAll && !clearAll && (
+                <>
+                  <button
+                    onClick={() => { setClearAll(true); setConfirmClearAll(false) }}
+                    className="text-[9px] font-mono text-accent-red hover:text-accent-red/80 transition-colors"
+                  >
+                    Confirm?
+                  </button>
+                  <button
+                    onClick={() => setConfirmClearAll(false)}
+                    className="text-[9px] font-mono text-text-muted hover:text-text-primary transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </>
+              )}
+              {!confirmClearAll && (
+                <button
+                  onClick={() => setConfirmClearAll(true)}
+                  disabled={clearAll}
+                  className="text-[9px] font-mono text-accent-red/70 hover:text-accent-red transition-colors disabled:opacity-40"
+                >
+                  ✕ Clear all
+                </button>
+              )}
+            </div>
+          </div>
           {workloads.map(w => (
             <WorkloadCard
               key={w.id}
               workload={w}
               clusterName={clusterName}
+              autoDelete={clearAll}
               onRateUpdate={handleRateUpdate}
               onDelete={() => {
                 setRates(prev => { const n = {...prev}; delete n[w.id]; return n })
@@ -937,22 +1131,6 @@ export default function WorkloadPanel({
         </button>
       )}
 
-      {showList && (
-        <div className="space-y-1">
-          <button onClick={async () => {
-            setPrepulling(true); setPrepullMsg('Pre-pulling image on all nodes…')
-            try {
-              const r = await api.post<{message: string}>(`/clusters/${clusterName}/prepull`, {})
-              setPrepullMsg('✓ ' + r.message)
-            } catch { setPrepullMsg('Pre-pull failed') }
-            finally { setPrepulling(false) }
-          }} disabled={prepulling}
-            className="text-[9px] font-mono text-text-muted hover:text-accent-cyan transition-colors">
-            {prepulling ? '⏳ Pre-pulling fio image on all nodes…' : '⬇ Pre-pull fio image on all nodes'}
-          </button>
-          {prepullMsg && <p className="text-[9px] font-mono text-text-muted">{prepullMsg}</p>}
-        </div>
-      )}
     </div>
 
       {/* ── Saved Sequences ── */}

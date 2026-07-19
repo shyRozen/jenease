@@ -9,7 +9,7 @@ from sqlmodel import Session, select
 
 from auth import get_session
 from database import engine
-from models import WorkloadSession
+from models import Workload, WorkloadSession
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -57,15 +57,46 @@ class ThroughputSample(BaseModel):
     total: float
 
 
+@router.get("/ping")
+def ping():
+    return {"ok": True, "router": "sessions"}
+
+
 @router.post("/")
 def start_session(body: StartRequest, auth: dict = Depends(get_session)):
-    name = f"{body.cluster_name} {datetime.utcnow().strftime('%b %d %H:%M')}"
-    ws = WorkloadSession(
-        name=name,
-        cluster_name=body.cluster_name,
-        username=auth["username"],
-    )
+    name = body.cluster_name if hasattr(body, 'name') and getattr(body, 'name', None) else \
+        f"{body.cluster_name} {datetime.utcnow().strftime('%b %d %H:%M')}"
     with Session(engine) as db:
+        # Snapshot any workloads already running for this cluster/user at offset_ms=0
+        running = db.exec(
+            select(Workload).where(
+                Workload.cluster_name == body.cluster_name,
+                Workload.username == auth["username"],
+            )
+        ).all()
+        events = [
+            {
+                "offset_ms": 0,
+                "type": "launch",
+                "workload_type": w.workload_type,
+                "size_gb": w.size_gb,
+                "mode": w.mode,
+                "pattern": w.pattern,
+                "block_size": "1m",
+                "num_jobs": 4,
+                "iodepth": 32,
+                "duration_sec": 0,
+                "obj_size_mb": 64,
+                "workers": 8,
+            }
+            for w in running
+        ]
+        ws = WorkloadSession(
+            name=name,
+            cluster_name=body.cluster_name,
+            username=auth["username"],
+            events=json.dumps(events),
+        )
         db.add(ws)
         db.commit()
         db.refresh(ws)

@@ -446,6 +446,7 @@ export default function ClusterDetail() {
                 ) : null}
                 <WorkloadPanel
                   clusterName={name!}
+                  kubeconfigUrl={cluster?.kubeconfig_url}
                   showLauncher={false}
                   sharedRatesRef={isOwner ? sharedRatesRef : undefined}
                 />
@@ -455,6 +456,7 @@ export default function ClusterDetail() {
                 <div>
                   <WorkloadPanel
                     clusterName={name!}
+                    kubeconfigUrl={cluster?.kubeconfig_url}
                     showList={false}
                     sharedRatesRef={sharedRatesRef}
                   />

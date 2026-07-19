@@ -15,18 +15,21 @@ from jenkins import JenkinsClient
 from datetime import datetime
 from models import Workload, WorkloadSession
 from workload_runner import (
-    create_workload,
+    create_and_stream_workload,
     delete_workload_namespace,
     get_pod_phase,
     parse_fio_line,
     stream_cleanup,
-    stream_pod_logs,
 )
 from config import settings
 
 router = APIRouter(prefix="/api/clusters", tags=["workloads"])
 
 DEPLOY_JOB = "qe-deploy-ocs-cluster"
+_KUBECONFIG_CACHE: dict[str, tuple[str, float]] = {}  # cluster_name -> (url, timestamp)
+_KUBECONFIG_TTL = 3600  # 1 hour
+# Creation params stored per workload_id so the log stream can run the full creation
+_PENDING_PARAMS: dict[int, dict] = {}
 
 
 def _make_jenkins(session: dict) -> JenkinsClient:
@@ -39,12 +42,20 @@ def _cluster_name_from_desc(description: str) -> Optional[str]:
 
 
 async def _get_kubeconfig_url(jenkins: JenkinsClient, cluster_name: str) -> Optional[str]:
-    """Find the kubeconfig URL for a cluster by scanning deploy builds."""
+    """Find the kubeconfig URL for a cluster — cached 1h to avoid rescanning 200 builds."""
+    cached = _KUBECONFIG_CACHE.get(cluster_name)
+    if cached:
+        url, ts = cached
+        if time.time() - ts < _KUBECONFIG_TTL:
+            return url
     builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
     for b in builds:
         if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
             parsed = JenkinsClient.parse_build_description(b.get("description", "") or "")
-            return parsed.get("kubeconfig_url")
+            url = parsed.get("kubeconfig_url")
+            if url:
+                _KUBECONFIG_CACHE[cluster_name] = (url, time.time())
+            return url
     return None
 
 
@@ -68,6 +79,29 @@ class CreateWorkloadRequest(BaseModel):
     direct: bool = True         # --direct=1 (bypass page cache)
     # Recording
     session_id: Optional[int] = None
+    # Pass kubeconfig_url from the frontend to skip scanning 200 Jenkins builds
+    kubeconfig_url: Optional[str] = None
+
+
+class SyncLaunchItem(BaseModel):
+    workload_type: str
+    size_gb: int
+    mode: str
+    pattern: str = "sequential"
+    block_size: str = "1m"
+    num_jobs: int = 4
+    iodepth: int = 32
+    duration_sec: int = 0
+    obj_size_mb: int = 64
+    workers: int = 8
+    engine: str = "libaio"
+    direct: bool = True
+    offset_sec: float = 0  # kept for compatibility, ignored in sync mode
+
+class SyncLaunchRequest(BaseModel):
+    workloads: list[SyncLaunchItem]
+    session_id: Optional[int] = None
+    kubeconfig_url: Optional[str] = None
 
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
@@ -82,39 +116,20 @@ async def create(
     if not cluster_name.lower().startswith(username.lower()):
         raise HTTPException(403, "Not your cluster")
 
-    jenkins = _make_jenkins(session)
-    kubeconfig_url = await _get_kubeconfig_url(jenkins, cluster_name)
-    if not kubeconfig_url:
-        raise HTTPException(404, "Kubeconfig not found for this cluster")
+    if body.kubeconfig_url:
+        kubeconfig_url = body.kubeconfig_url
+    else:
+        jenkins = _make_jenkins(session)
+        kubeconfig_url = await _get_kubeconfig_url(jenkins, cluster_name)
+        if not kubeconfig_url:
+            raise HTTPException(404, "Kubeconfig not found for this cluster")
 
     # Generate unique IDs
     import uuid as _uuid
-    wl_uid = _uuid.uuid4().hex[:8]   # 8-char hex — unique even for concurrent launches
+    wl_uid = _uuid.uuid4().hex[:8]
     namespace = f"jenease-wl-{wl_uid}"
     pvc_name  = f"wl-pvc-{wl_uid}"
     pod_name  = f"wl-pod-{wl_uid}"
-
-    try:
-        await create_workload(
-            kubeconfig_url=kubeconfig_url,
-            namespace=namespace,
-            pvc_name=pvc_name,
-            pod_name=pod_name,
-            workload_type=body.workload_type,
-            size_gb=body.size_gb,
-            mode=body.mode,
-            pattern=body.pattern,
-            block_size=body.block_size,
-            num_jobs=body.num_jobs,
-            iodepth=body.iodepth,
-            duration_sec=body.duration_sec,
-            obj_size_mb=body.obj_size_mb,
-            workers=body.workers,
-            engine=body.engine,
-            direct=body.direct,
-        )
-    except Exception as e:
-        raise HTTPException(502, f"Failed to create workload: {e}")
 
     workload = Workload(
         cluster_name=cluster_name,
@@ -161,7 +176,129 @@ async def create(
         except Exception:
             pass
 
+    # Store creation params — the log stream SSE will do the actual k8s work
+    # with per-step status messages. POST returns instantly so the card appears immediately.
+    _PENDING_PARAMS[wid] = {
+        "kubeconfig_url": kubeconfig_url,
+        "namespace":      namespace,
+        "pvc_name":       pvc_name,
+        "pod_name":       pod_name,
+        "workload_type":  body.workload_type,
+        "size_gb":        body.size_gb,
+        "mode":           body.mode,
+        "pattern":        body.pattern,
+        "block_size":     body.block_size,
+        "num_jobs":       body.num_jobs,
+        "iodepth":        body.iodepth,
+        "duration_sec":   body.duration_sec,
+        "obj_size_mb":    body.obj_size_mb,
+        "workers":        body.workers,
+        "engine":         body.engine,
+        "direct":         body.direct,
+    }
+
     return {"id": wid, "namespace": namespace, "pod_name": pod_name}
+
+
+@router.post("/{cluster_name}/workloads/sync-launch")
+async def sync_launch(
+    cluster_name: str,
+    body: SyncLaunchRequest,
+    session: dict = Depends(get_session),
+):
+    """Launch multiple workloads with synchronized IO start — all pods created first, then IO fires simultaneously."""
+    from workload_runner import _SYNC_GROUPS
+    import uuid as _uuid, threading as _threading
+
+    username = session["username"]
+    if not cluster_name.lower().startswith(username.lower()):
+        raise HTTPException(403, "Not your cluster")
+    if not body.workloads:
+        raise HTTPException(400, "No workloads specified")
+
+    if body.kubeconfig_url:
+        kubeconfig_url = body.kubeconfig_url
+    else:
+        jenkins = _make_jenkins(session)
+        kubeconfig_url = await _get_kubeconfig_url(jenkins, cluster_name)
+        if not kubeconfig_url:
+            raise HTTPException(404, "Kubeconfig not found for this cluster")
+
+    sync_id    = _uuid.uuid4().hex[:8]
+    workload_ids = []
+    namespaces   = []
+    pod_names    = []
+
+    with Session(engine) as db:
+        for item in body.workloads:
+            wl_uid    = _uuid.uuid4().hex[:8]
+            namespace = f"jenease-wl-{wl_uid}"
+            pvc_name  = f"wl-pvc-{wl_uid}"
+            pod_name  = f"wl-pod-{wl_uid}"
+            w = Workload(
+                cluster_name=cluster_name, username=username,
+                workload_type=item.workload_type, namespace=namespace,
+                pod_name=pod_name, pvc_name=pvc_name,
+                size_gb=item.size_gb, mode=item.mode, pattern=item.pattern,
+                kubeconfig_url=kubeconfig_url,
+            )
+            db.add(w)
+            db.flush()
+            _PENDING_PARAMS[w.id] = {
+                "kubeconfig_url": kubeconfig_url, "namespace": namespace,
+                "pvc_name": pvc_name, "pod_name": pod_name,
+                "workload_type": item.workload_type, "size_gb": item.size_gb,
+                "mode": item.mode, "pattern": item.pattern, "block_size": item.block_size,
+                "num_jobs": item.num_jobs, "iodepth": item.iodepth,
+                "duration_sec": item.duration_sec, "obj_size_mb": item.obj_size_mb,
+                "workers": item.workers, "engine": item.engine, "direct": item.direct,
+                "synced": True, "sync_id": sync_id,
+            }
+            workload_ids.append(w.id)
+            namespaces.append(namespace)
+            pod_names.append(pod_name)
+        db.commit()
+
+    # Register sync group — log streams signal when each pod is Running
+    _SYNC_GROUPS[sync_id] = {
+        "expected":   len(body.workloads),
+        "ready":      0,
+        "lock":       _threading.Lock(),
+        "namespaces": namespaces,
+        "pod_names":  pod_names,
+        "kubeconfig_url": kubeconfig_url,
+    }
+
+    # Record all workload events in the session (all at offset 0 — sync fires simultaneously)
+    if body.session_id:
+        try:
+            with Session(engine) as db:
+                ws = db.get(WorkloadSession, body.session_id)
+                if ws and ws.status == "recording":
+                    offset_ms = int((datetime.utcnow() - ws.started_at).total_seconds() * 1000)
+                    events = json.loads(ws.events)
+                    for item in body.workloads:
+                        events.append({
+                            "offset_ms": offset_ms,
+                            "workload_type": item.workload_type,
+                            "size_gb": item.size_gb,
+                            "mode": item.mode,
+                            "pattern": item.pattern,
+                            "block_size": item.block_size,
+                            "num_jobs": item.num_jobs,
+                            "iodepth": item.iodepth,
+                            "duration_sec": item.duration_sec,
+                            "obj_size_mb": item.obj_size_mb,
+                            "workers": item.workers,
+                            "synced": True,
+                        })
+                    ws.events = json.dumps(events)
+                    db.add(ws)
+                    db.commit()
+        except Exception:
+            pass
+
+    return {"workload_ids": workload_ids}
 
 
 @router.get("/{cluster_name}/workloads")
@@ -179,10 +316,12 @@ async def list_workloads(
         ).all()
 
     import asyncio as _aio
-    phases = await _aio.gather(*[
-        get_pod_phase(w.kubeconfig_url, w.namespace, w.pod_name)
-        for w in workloads
-    ])
+    # Skip k8s phase lookup for workloads pending creation — they're always 'Pending'
+    async def _phase(w):
+        if w.id in _PENDING_PARAMS:
+            return "Pending"
+        return await get_pod_phase(w.kubeconfig_url, w.namespace, w.pod_name)
+    phases = await _aio.gather(*[_phase(w) for w in workloads])
 
     return [
         {
@@ -232,18 +371,43 @@ async def cleanup_stream(
         namespace      = workload.namespace
         pod_name       = workload.pod_name
         pvc_name       = workload.pvc_name
+        # Record delete event in any active recording session for this cluster/user
+        from models import WorkloadSession as WS
+        active = db.exec(
+            select(WS).where(
+                WS.cluster_name == cluster_name,
+                WS.username == username,
+                WS.status == "recording",
+            )
+        ).all()
+        for ws in active:
+            try:
+                offset_ms = int((datetime.utcnow() - ws.started_at).total_seconds() * 1000)
+                events = json.loads(ws.events)
+                events.append({
+                    "offset_ms": offset_ms,
+                    "type": "delete",
+                    "workload_type": workload.workload_type,
+                    "size_gb": workload.size_gb,
+                    "mode": workload.mode,
+                    "pattern": workload.pattern,
+                })
+                ws.events = json.dumps(events)
+                db.add(ws)
+            except Exception:
+                pass
+        db.commit()
 
     async def generate():
         async for line in stream_cleanup(kubeconfig_url, namespace, pod_name, pvc_name):
-            done = "complete" in line.lower() or "failed" in line.lower()
-            if done:
-                # Delete DB record now that k8s is clean
-                with Session(engine) as db:
-                    w = db.get(Workload, workload_id)
-                    if w:
-                        db.delete(w)
-                        db.commit()
-            yield {"data": json.dumps({"line": line, "done": done})}
+            yield {"data": json.dumps({"line": line, "done": False})}
+        # Always delete DB record and signal done — regardless of what k8s returned
+        with Session(engine) as db:
+            w = db.get(Workload, workload_id)
+            if w:
+                db.delete(w)
+                db.commit()
+        yield {"data": json.dumps({"line": "[jenease] Done.", "done": True})}
 
     return EventSourceResponse(generate(), headers={"Content-Encoding": "identity"})
 
@@ -320,16 +484,21 @@ async def stream_logs(
         workload = db.get(Workload, workload_id)
         if not workload or workload.username != username or workload.cluster_name != cluster_name:
             raise HTTPException(404, "Workload not found")
-        kubeconfig_url = workload.kubeconfig_url
-        namespace = workload.namespace
-        pod_name = workload.pod_name
-        size_bytes = workload.size_gb * 1024 * 1024 * 1024
+
+    params = _PENDING_PARAMS.pop(workload_id, None)
 
     async def generate():
-        yield {"data": json.dumps({"line": "[jenease] Connecting to cluster…"})}
-        async for line in stream_pod_logs(kubeconfig_url, namespace, pod_name):
-            parsed = parse_fio_line(line, size_bytes=size_bytes)
-            yield {"data": json.dumps(parsed)}
+        size_bytes = workload.size_gb * 1024 * 1024 * 1024
+        fio_state: dict = {}
+        from workload_runner import stream_pod_logs
+        if params:
+            # Full creation with per-step status messages (synced=True adds sync CM + poll script)
+            async for item in create_and_stream_workload(**params):
+                yield {"data": json.dumps(item)}
+        else:
+            # Pod already exists (page reload) — just stream existing logs
+            yield {"data": json.dumps({"line": "[jenease] Connecting to cluster…"})}
+            async for line in stream_pod_logs(workload.kubeconfig_url, workload.namespace, workload.pod_name):
+                yield {"data": json.dumps(parse_fio_line(line, size_bytes=size_bytes, fio_state=fio_state))}
 
-    # Content-Encoding: identity prevents GZipMiddleware from buffering the SSE stream
     return EventSourceResponse(generate(), headers={"Content-Encoding": "identity"})

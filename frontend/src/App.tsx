@@ -49,13 +49,19 @@ function PrefetchManager({ username }: { username: string }) {
             queryFn: () => api.get(`/clusters/${c.cluster_name}/health`),
             staleTime: 30_000,
           }).then(health => {
-            // Step 3: for reachable clusters prefetch full details
+            // Step 3: for reachable clusters prefetch full details + auto-prepull if needed
             if (health?.status === 'HEALTHY' || health?.status === 'DEGRADED') {
               queryClient.prefetchQuery({
                 queryKey: ['details', c.cluster_name],
                 queryFn: () => api.get(`/clusters/${c.cluster_name}/details`),
                 staleTime: 60_000,
               })
+              // Auto-prepull: for owned clusters, kick off pull if any node is missing an image
+              if (c.owner === username) {
+                api.get<{ all_cached: boolean }>(`/clusters/${c.cluster_name}/image-status`)
+                  .then(s => { if (!s.all_cached) api.post(`/clusters/${c.cluster_name}/prepull`, {}) })
+                  .catch(() => {})
+              }
             }
           }).catch(() => {})
         }, i * 150) // 150ms between each cluster — 50 clusters = 7.5s total spread

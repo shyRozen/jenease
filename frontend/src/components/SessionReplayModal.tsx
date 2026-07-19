@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import ThroughputChart, { type DataPoint, SERIES } from './ThroughputChart'
 
 export interface SessionEvent {
@@ -52,11 +52,84 @@ function fmtMs(ms: number): string {
 }
 
 function fmtParams(e: SessionEvent): string {
+  if ((e as any).type === 'delete') return 'deleted'
   if (e.workload_type === 'noobaa') {
-    return `${e.size_gb}GB · ${e.mode} · ${e.obj_size_mb}MB obj · ${e.workers}w`
+    return `${e.size_gb}GB · ${e.mode} · ${(e.obj_size_mb ?? 64)}MB obj · ${(e.workers ?? 8)}w`
   }
   const dur = e.duration_sec > 0 ? `${e.duration_sec}s` : `${e.size_gb}GB`
-  return `${dur} · ${e.mode} · ${e.pattern} · bs=${e.block_size} · j=${e.num_jobs}`
+  return `${dur} · ${e.mode} · ${e.pattern ?? 'seq'} · bs=${e.block_size ?? '1m'} · j=${e.num_jobs ?? 4}`
+}
+
+// Pair each launch event with its matching delete event (FIFO per workload_type)
+function buildPairs(events: SessionEvent[]) {
+  const deleteQueues: Record<string, SessionEvent[]> = {}
+  for (const e of events) {
+    if ((e as any).type === 'delete') {
+      deleteQueues[e.workload_type] = [...(deleteQueues[e.workload_type] || []), e]
+    }
+  }
+  return events
+    .filter(e => (e as any).type !== 'delete')
+    .map(launch => {
+      const q = deleteQueues[launch.workload_type] || []
+      const idx = q.findIndex(d => d.offset_ms > launch.offset_ms)
+      if (idx >= 0) {
+        const del = q[idx]
+        deleteQueues[launch.workload_type] = q.filter((_, i) => i !== idx)
+        return { launch, del }
+      }
+      return { launch, del: null as SessionEvent | null }
+    })
+}
+
+// Blink opacity computed from currentMs — syncs with playback, pauses when paused
+function blinkOpacity(launchMs: number, deleteMs: number | null, totalMs: number, currentMs: number): number {
+  if (currentMs < launchMs) return 0.3               // not started yet
+  if (deleteMs !== null && currentMs >= deleteMs) return 0.35  // deleted
+  const elapsed = currentMs - launchMs
+  const period  = elapsed < 3000 ? 500 : 2000        // fast (2Hz) then slow (0.5Hz)
+  const wave    = (Math.sin((currentMs / period) * Math.PI * 2) + 1) / 2  // 0→1
+  return 0.35 + 0.65 * wave                          // 0.35→1.0
+}
+
+function WorkloadMarkers({ events, currentMs, totalMs }: {
+  events: SessionEvent[]; currentMs: number; totalMs: number
+}) {
+  const pairs = useMemo(() => buildPairs(events), [events])
+
+  return (
+    <div className="flex flex-wrap gap-x-4 gap-y-1">
+      {pairs.map(({ launch: e, del }, i) => {
+        const deleteMs = del?.offset_ms ?? null
+        const opacity  = blinkOpacity(e.offset_ms, deleteMs, totalMs, currentMs)
+        const isDeleted = deleteMs !== null && currentMs >= deleteMs
+        const isRunning = currentMs >= e.offset_ms && !isDeleted
+        const color = TYPE_COLORS[e.workload_type] ?? '#888'
+
+        return (
+          <div key={i} className="flex items-center gap-1 text-[9px] font-mono" style={{ opacity }}>
+            {/* Status dot */}
+            <span style={{ color: isDeleted ? '#6b7280' : color }}>
+              {isDeleted ? '✕' : isRunning ? '●' : '○'}
+            </span>
+            {/* Timestamp */}
+            <span style={{ color }} className="text-[8px]">+{fmtMs(e.offset_ms)}</span>
+            {/* Type + params */}
+            <span style={{ color }} className="font-semibold">{e.workload_type.toUpperCase()}</span>
+            <span className={isDeleted ? 'text-gray-500 line-through' : 'text-text-muted'}>
+              {fmtParams(e)}
+            </span>
+            {/* Delete indicator */}
+            {deleteMs !== null && (
+              <span className="text-red-400 text-[8px]">
+                {isDeleted ? `✕ +${fmtMs(deleteMs)}` : `→✕ +${fmtMs(deleteMs)}`}
+              </span>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 export default function SessionReplayModal({ session, onClose }: { session: SessionFull; onClose: () => void }) {
@@ -160,20 +233,10 @@ export default function SessionReplayModal({ session, onClose }: { session: Sess
           <ThroughputChart data={displayData} />
         </div>
 
-        {/* Workload event markers (timeline labels below chart) */}
+        {/* Workload event markers with correlated blink */}
         {session.events.length > 0 && (
           <div className="px-5 pb-2">
-            <div className="flex flex-wrap gap-2">
-              {session.events.map((e, i) => (
-                <div key={i} className="flex items-center gap-1.5 text-[9px] font-mono text-text-muted">
-                  <span style={{ color: TYPE_COLORS[e.workload_type] ?? '#888' }}>
-                    ▸ +{fmtMs(e.offset_ms)}
-                  </span>
-                  <span className="text-text-secondary">{e.workload_type.toUpperCase()}</span>
-                  <span>{fmtParams(e)}</span>
-                </div>
-              ))}
-            </div>
+            <WorkloadMarkers events={session.events} currentMs={currentMs} totalMs={totalMs} />
           </div>
         )}
 

@@ -41,6 +41,19 @@ NUMJOBS     = 4
 IO_IMAGE     = "quay.io/ocsci/nginx:latest"   # Alpine + fio 3.41 pre-installed
 NOOBAA_IMAGE = "registry.access.redhat.com/ubi9/python-311:latest"
 
+# Bash snippet prepended to pod command when sync mode is enabled.
+# Pod reads its own namespace's jenease-sync ConfigMap via the k8s API using
+# the mounted service-account token (available by default on OpenShift).
+# Shared sync groups: sync_id → {expected, ready, lock, namespaces, kubeconfig_url}
+_SYNC_GROUPS: dict[str, dict] = {}
+
+
+SYNC_POLL_CMD = (
+    "echo '[jenease] Waiting for sync signal…' && "
+    "until [ -f /tmp/jenease-start ]; do sleep 1; done && "
+    "echo '[jenease] ✓ All pods ready — starting IO' && "
+)
+
 PROGRESS_RE = re.compile(r"\[(\d+\.?\d*)%\]")
 RATE_RE      = re.compile(r"\[(?:r|w|rw)=([^\]]+)\]")
 ETA_RE       = re.compile(r"\[eta\s+([^\]]+)\]")
@@ -184,13 +197,22 @@ print("[jenease] Workload complete.", flush=True)
 
 # ── kubeconfig helpers ────────────────────────────────────────────────────────
 
+_KUBECONFIG_CONTENT_CACHE: dict[str, tuple[dict, float]] = {}
+_KUBECONFIG_CONTENT_TTL = 3600  # 1 hour
+
+
 def _sync_load_k8s(kubeconfig_url: str):
-    """Download kubeconfig and return (CoreV1Api, CustomObjectsApi, cfg)."""
+    """Download kubeconfig and return (CoreV1Api, CustomObjectsApi, cfg). Content cached 1h."""
     from kubernetes import client, config as k8s_config
 
-    r = httpx.get(kubeconfig_url, timeout=10.0)
-    r.raise_for_status()
-    kube_dict = yaml.safe_load(r.text)
+    cached = _KUBECONFIG_CONTENT_CACHE.get(kubeconfig_url)
+    if cached and time.time() - cached[1] < _KUBECONFIG_CONTENT_TTL:
+        kube_dict = cached[0]
+    else:
+        r = httpx.get(kubeconfig_url, timeout=10.0)
+        r.raise_for_status()
+        kube_dict = yaml.safe_load(r.text)
+        _KUBECONFIG_CONTENT_CACHE[kubeconfig_url] = (kube_dict, time.time())
 
     k8s_config.load_kube_config_from_dict(kube_dict)
     cfg = client.Configuration.get_default_copy()
@@ -577,7 +599,10 @@ async def stream_cleanup(
                     )
                     _put("[jenease] Pod deleted.")
                 except Exception as e:
-                    _put(f"[jenease] Pod: {e}")
+                    if "404" in str(e) or "NotFound" in str(e):
+                        _put("[jenease] Pod already gone.")
+                    else:
+                        _put(f"[jenease] Pod: {e}")
 
             # 2. Remove OBC finalizers (NooBaa) so PVC/namespace don't get stuck
             try:
@@ -603,19 +628,24 @@ async def stream_cleanup(
                     core.delete_namespaced_persistent_volume_claim(pvc_name, namespace)
                     _put("[jenease] PVC deleted.")
                 except Exception as e:
-                    _put(f"[jenease] PVC: {e}")
+                    if "404" in str(e) or "NotFound" in str(e):
+                        _put("[jenease] PVC already gone.")
+                    else:
+                        _put(f"[jenease] PVC: {e}")
 
             # 4. Delete namespace
             _put(f"[jenease] Deleting namespace {namespace}…")
             try:
                 core.delete_namespace(namespace, body=_k8s.V1DeleteOptions(grace_period_seconds=0))
-                _put("[jenease] Cleanup complete.")
             except Exception as e:
-                _put(f"[jenease] Namespace: {e}")
+                if "404" not in str(e) and "NotFound" not in str(e):
+                    _put(f"[jenease] Namespace: {e}")
+            _put("[jenease] Cleanup complete.")
 
             api_client.close()
         except Exception as e:
             _put(f"[error] Cleanup failed: {e}")
+            _put("[jenease] Cleanup complete.")
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, None)
 
@@ -673,8 +703,6 @@ async def stream_pod_logs(
                                 "waiting for PVC to provision…",
                             )
                         msg = f"[jenease] Pod pending — {detail}"
-                        if detail in ("ContainerCreating", "ContainersNotReady"):
-                            msg += " (pulling image, may take a few minutes on first run)"
                         loop.call_soon_threadsafe(queue.put_nowait, msg)
                 except Exception:
                     pass
@@ -726,6 +754,647 @@ async def stream_pod_logs(
         yield line
 
 
+async def create_and_stream_workload(
+    kubeconfig_url: str,
+    namespace: str,
+    pvc_name: str,
+    pod_name: str,
+    workload_type: str,
+    size_gb: int,
+    mode: str,
+    pattern: str,
+    block_size: str = "1m",
+    num_jobs: int = 4,
+    iodepth: int = 32,
+    duration_sec: int = 0,
+    obj_size_mb: int = 64,
+    workers: int = 8,
+    engine: str = "libaio",
+    direct: bool = True,
+    synced: bool = False,
+    sync_id: str = "",
+    **_extra,  # absorb unknown keys from _PENDING_PARAMS
+) -> AsyncGenerator[str, None]:
+    """Create k8s resources with per-step status messages, then stream pod logs."""
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def _run():
+        try:
+            from kubernetes import client
+
+            def emit(msg: str):
+                loop.call_soon_threadsafe(queue.put_nowait, msg)
+
+            # ── Connect ──────────────────────────────────────────────────────
+            emit("[jenease] Connecting to cluster…")
+            core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
+            rbac = client.RbacAuthorizationV1Api(api_client)
+            emit("[jenease] ✓ Connected")
+
+            # ── Namespace ────────────────────────────────────────────────────
+            emit(f"[jenease] Creating namespace {namespace}…")
+            try:
+                core.create_namespace(client.V1Namespace(
+                    metadata=client.V1ObjectMeta(name=namespace)
+                ))
+            except Exception:
+                pass  # already exists
+            emit(f"[jenease] ✓ Namespace {namespace} ready")
+
+            # ── SCC ──────────────────────────────────────────────────────────
+            try:
+                rbac.create_namespaced_role_binding(
+                    namespace,
+                    client.V1RoleBinding(
+                        metadata=client.V1ObjectMeta(name="jenease-anyuid", namespace=namespace),
+                        subjects=[client.V1Subject(kind="ServiceAccount", name="default", namespace=namespace)],
+                        role_ref=client.V1RoleRef(
+                            api_group="rbac.authorization.k8s.io",
+                            kind="ClusterRole",
+                            name="system:openshift:scc:anyuid",
+                        ),
+                    ),
+                )
+            except Exception:
+                pass
+
+            # ── PVC / OBC + Pod ─────────────────────────────────────────────
+            if workload_type == "noobaa":
+                # OBC
+                custom = client.CustomObjectsApi(api_client)
+                emit(f"[jenease] Creating OBC {pvc_name} (NooBaa bucket)…")
+                custom.create_namespaced_custom_object(
+                    group="objectbucket.io", version="v1alpha1",
+                    namespace=namespace, plural="objectbucketclaims",
+                    body={
+                        "apiVersion": "objectbucket.io/v1alpha1",
+                        "kind": "ObjectBucketClaim",
+                        "metadata": {"name": pvc_name, "namespace": namespace},
+                        "spec": {
+                            "generateBucketName": "jenease-bucket",
+                            "storageClassName": "openshift-storage.noobaa.io",
+                        },
+                    },
+                )
+                # Wait for OBC Bound
+                emit(f"[jenease] Waiting for OBC {pvc_name} to bind…")
+                for _i in range(60):
+                    time.sleep(2)
+                    try:
+                        obc = custom.get_namespaced_custom_object(
+                            group="objectbucket.io", version="v1alpha1",
+                            namespace=namespace, plural="objectbucketclaims", name=pvc_name,
+                        )
+                        if obc.get("status", {}).get("phase") == "Bound":
+                            break
+                    except Exception:
+                        pass
+                emit(f"[jenease] ✓ OBC {pvc_name} bound — reading credentials…")
+                import base64
+                def _dec(v): return base64.b64decode(v).decode() if v else ""
+                secret = core.read_namespaced_secret(pvc_name, namespace)
+                cm     = core.read_namespaced_config_map(pvc_name, namespace)
+                access_key  = _dec(secret.data.get("AWS_ACCESS_KEY_ID", ""))
+                secret_key  = _dec(secret.data.get("AWS_SECRET_ACCESS_KEY", ""))
+                bucket_name = cm.data.get("BUCKET_NAME", "jenease-bucket")
+                bucket_host = cm.data.get("BUCKET_HOST", "s3.openshift-storage.svc")
+                bucket_port = cm.data.get("BUCKET_PORT", "80")
+                protocol    = "https" if bucket_port in ("443", "8443") else "http"
+                s3_endpoint = f"{protocol}://{bucket_host}:{bucket_port}"
+                script_b64  = __import__("base64").b64encode(_NOOBAA_SCRIPT.encode()).decode()
+                raw_io      = f"echo '{script_b64}' | base64 -d | python3"
+                script_cmd  = f"pip install boto3 --quiet 2>/dev/null && {raw_io}"
+                emit(f"[jenease] Creating pod {pod_name} (NooBaa IO)…")
+                if synced:
+                    # pip install BEFORE sync wait so NooBaa is truly ready when signal fires
+                    final_noobaa_cmd = (
+                        "pip install boto3 --quiet 2>/dev/null && "
+                        "touch /tmp/noobaa-ready && "
+                        "echo '[jenease] boto3 ready — waiting for sync signal…' && "
+                        "until [ -f /tmp/jenease-start ]; do sleep 1; done && "
+                        f"echo '[jenease] ✓ Starting IO' && {raw_io}"
+                    )
+                else:
+                    final_noobaa_cmd = script_cmd
+                core.create_namespaced_pod(namespace, client.V1Pod(
+                    metadata=client.V1ObjectMeta(name=pod_name, namespace=namespace),
+                    spec=client.V1PodSpec(
+                        restart_policy="Never",
+                        containers=[client.V1Container(
+                            name="noobaa-io", image=NOOBAA_IMAGE,
+                            command=["/bin/bash", "-c", final_noobaa_cmd],
+                            env=[
+                                client.V1EnvVar(name="S3_ENDPOINT",  value=s3_endpoint),
+                                client.V1EnvVar(name="ACCESS_KEY",   value=access_key),
+                                client.V1EnvVar(name="SECRET_KEY",   value=secret_key),
+                                client.V1EnvVar(name="BUCKET_NAME",  value=bucket_name),
+                                client.V1EnvVar(name="SIZE_GB",      value=str(size_gb)),
+                                client.V1EnvVar(name="MODE",         value=mode),
+                                client.V1EnvVar(name="OBJ_SIZE_MB",  value=str(obj_size_mb)),
+                                client.V1EnvVar(name="WORKERS",      value=str(workers)),
+                            ],
+                        )],
+                    ),
+                ))
+            else:
+                sc         = STORAGE_CLASSES[workload_type]
+                acc_mode   = ACCESS_MODES[workload_type]
+                emit(f"[jenease] Creating PVC {pvc_name} ({size_gb}Gi, {sc})…")
+                core.create_namespaced_persistent_volume_claim(
+                    namespace,
+                    client.V1PersistentVolumeClaim(
+                        metadata=client.V1ObjectMeta(name=pvc_name),
+                        spec=client.V1PersistentVolumeClaimSpec(
+                            access_modes=[acc_mode],
+                            storage_class_name=sc,
+                            resources=client.V1ResourceRequirements(requests={"storage": f"{size_gb}Gi"}),
+                        ),
+                    ),
+                )
+                emit(f"[jenease] ✓ PVC {pvc_name} created — waiting for provisioner…")
+                fio_rw      = FIO_RW.get((mode, pattern), "write")
+                per_job_gb  = max(1, size_gb // num_jobs)
+                duration_desc = f"{duration_sec}s" if duration_sec > 0 else f"{per_job_gb}GB"
+                time_flags  = f"--time_based --runtime={duration_sec}" if duration_sec > 0 else ""
+                direct_flag = "--direct=1" if direct else ""
+                fio_cmd = (
+                    f"fio --name=jenease --ioengine={engine} {direct_flag} "
+                    f"--bs={block_size} --numjobs={num_jobs} --iodepth={iodepth} --rw={fio_rw} "
+                    f"--size={per_job_gb}g {time_flags} "
+                    f"--filename=/data/testfile --fallocate=none --status-interval=2 --group_reporting"
+                ).strip()
+                wrapped_fio = f"script -q -c '{fio_cmd}' /dev/null 2>&1" if direct_flag else f"{fio_cmd} 2>&1"
+                prefill = ""
+                if mode == "read":
+                    mb = size_gb * 1024
+                    prefill = (
+                        f"echo '[jenease] Pre-filling {size_gb}GB for read workload...' && "
+                        f"dd if=/dev/zero of=/data/testfile bs=64M count={mb // 64 + 1} 2>&1 | "
+                        f"grep -v '^$' | while IFS= read -r l; do echo \"[PREFILL] $l\"; done && "
+                    )
+                cmd = (
+                    f"echo '[jenease] Starting fio ({fio_rw}, bs={block_size}, {num_jobs} jobs × {duration_desc}, iodepth={iodepth}, engine={engine})...' && "
+                    f"{prefill}{wrapped_fio} && echo '[jenease] Workload complete.'"
+                )
+                emit(f"[jenease] Creating pod {pod_name} ({workload_type.upper()} IO)…")
+                core.create_namespaced_pod(namespace, client.V1Pod(
+                    metadata=client.V1ObjectMeta(name=pod_name, namespace=namespace),
+                    spec=client.V1PodSpec(
+                        restart_policy="Never",
+                        security_context=client.V1PodSecurityContext(run_as_user=0, run_as_group=0, fs_group=0),
+                        containers=[client.V1Container(
+                            name="io", image=IO_IMAGE,
+                            command=["/bin/bash", "-c", (SYNC_POLL_CMD + cmd) if synced else cmd],
+                            env=[client.V1EnvVar(name="SIZE_GB", value=str(size_gb))],
+                            security_context=client.V1SecurityContext(run_as_user=0, allow_privilege_escalation=False),
+                            volume_mounts=[client.V1VolumeMount(name="data", mount_path="/data")],
+                        )],
+                        volumes=[client.V1Volume(
+                            name="data",
+                            persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(claim_name=pvc_name),
+                        )],
+                    ),
+                ))
+
+            emit(f"[jenease] ✓ Pod {pod_name} created")
+
+            # ── Wait for Running ─────────────────────────────────────────────
+            # Use actual write size (per_job_gb * num_jobs), not PVC size (size_gb).
+            # Integer division means 10GB / 4 jobs = 2GB/job = 8GB total written.
+            if workload_type == "noobaa":
+                size_bytes = size_gb * 1024 * 1024 * 1024
+            else:
+                per_job_gb = max(1, size_gb // num_jobs)
+                size_bytes = per_job_gb * num_jobs * 1024 * 1024 * 1024
+            fio_state: dict = {}  # tracks prev sectors for delta-based rate extraction
+            last_detail = ""
+            for _ in range(300):
+                try:
+                    pod = core.read_namespaced_pod(name=pod_name, namespace=namespace)
+                    phase = pod.status.phase or ""
+                    cs_list = pod.status.container_statuses or []
+                    container_running = any(cs.state and cs.state.running for cs in cs_list)
+                    if container_running or phase in ("Succeeded", "Failed"):
+                        # For NooBaa in sync mode, wait until pip install is done
+                        if synced and workload_type == "noobaa" and container_running:
+                            from kubernetes.stream import stream as _ks
+                            emit("[jenease] Container running — waiting for boto3 install…")
+                            for _ in range(90):
+                                try:
+                                    out = _ks(core.connect_get_namespaced_pod_exec,
+                                              pod_name, namespace,
+                                              command=["sh", "-c", "test -f /tmp/noobaa-ready && echo yes"],
+                                              stderr=False, stdin=False, stdout=True, tty=False)
+                                    if "yes" in (out or ""):
+                                        emit("[jenease] ✓ boto3 ready — NooBaa set for sync")
+                                        break
+                                except Exception:
+                                    pass
+                                time.sleep(2)
+                        break
+                    if phase in ("Pending", "Running"):
+                        detail = None
+                        for cs in cs_list:
+                            if cs.state and cs.state.waiting:
+                                w = cs.state.waiting
+                                detail = w.reason or detail
+                                if w.message:
+                                    detail = f"{w.reason}: {w.message[:80]}"
+                        if not detail:
+                            detail = next(
+                                (c.reason for c in (pod.status.conditions or []) if c.reason),
+                                "initializing…",
+                            )
+                        if detail != last_detail:
+                            emit(f"[jenease] Pod {pod_name} — {detail}")
+                            last_detail = detail
+                except Exception:
+                    pass
+                time.sleep(2)
+
+            # ── Sync group signaling ─────────────────────────────────────────
+            if synced and sync_id and sync_id in _SYNC_GROUPS:
+                group = _SYNC_GROUPS[sync_id]
+                with group["lock"]:
+                    group["ready"] += 1
+                    all_ready = group["ready"] >= group["expected"]
+                if all_ready:
+                    emit("[jenease] ✓ All pods running — firing sync signal…")
+                    _sync_signal_start(kubeconfig_url, group["namespaces"], group["pod_names"])
+                    _SYNC_GROUPS.pop(sync_id, None)
+                else:
+                    remaining = group["expected"] - group["ready"]
+                    emit(f"[jenease] Pod ready — waiting for {remaining} more pod(s)…")
+
+            # ── Stream logs ──────────────────────────────────────────────────
+            try:
+                pod = core.read_namespaced_pod(name=pod_name, namespace=namespace)
+                final_phase = pod.status.phase or ""
+            except Exception:
+                final_phase = ""
+
+            for attempt in range(5):
+                try:
+                    follow = final_phase not in ("Succeeded", "Failed")
+                    response = core.read_namespaced_pod_log(
+                        name=pod_name, namespace=namespace,
+                        follow=follow, _preload_content=False,
+                    )
+                    for chunk in response:
+                        for line in chunk.decode("utf-8", errors="replace").splitlines():
+                            if line.strip():
+                                parsed = parse_fio_line(line, size_bytes=size_bytes, fio_state=fio_state)
+                                loop.call_soon_threadsafe(queue.put_nowait, parsed)
+                    break
+                except Exception as e:
+                    if attempt < 4 and ("400" in str(e) or "ContainerCreating" in str(e)):
+                        emit("[jenease] Container starting, retrying log stream…")
+                        time.sleep(3)
+                    else:
+                        emit(f"[error] Log stream: {e}")
+                        break
+
+            api_client.close()
+        except Exception as e:
+            loop.call_soon_threadsafe(queue.put_nowait, f"[error] {e}")
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    while True:
+        item = await queue.get()
+        if item is None:
+            break
+        # item is either a string (status message) or a dict (parsed fio line)
+        if isinstance(item, str):
+            yield {"line": item}
+        else:
+            yield item
+
+
+def _sync_setup_sync_configmap(core, rbac, client, namespace: str):
+    """Create Role+RoleBinding (ConfigMap read) and jenease-sync CM in the workload namespace."""
+    try:
+        rbac.create_namespaced_role(namespace, client.V1Role(
+            metadata=client.V1ObjectMeta(name="jenease-cm-reader", namespace=namespace),
+            rules=[client.V1PolicyRule(api_groups=[""], resources=["configmaps"], verbs=["get"])],
+        ))
+    except Exception:
+        pass
+    try:
+        rbac.create_namespaced_role_binding(namespace, client.V1RoleBinding(
+            metadata=client.V1ObjectMeta(name="jenease-cm-reader", namespace=namespace),
+            subjects=[client.V1Subject(kind="ServiceAccount", name="default", namespace=namespace)],
+            role_ref=client.V1RoleRef(api_group="rbac.authorization.k8s.io", kind="Role", name="jenease-cm-reader"),
+        ))
+    except Exception:
+        pass
+    try:
+        core.create_namespaced_config_map(namespace, client.V1ConfigMap(
+            metadata=client.V1ObjectMeta(name="jenease-sync", namespace=namespace),
+            data={"start": "false"},
+        ))
+    except Exception:
+        pass
+
+
+def _sync_signal_start(kubeconfig_url: str, namespaces: list[str], pod_names: list[str]):
+    """Touch /tmp/jenease-start inside each pod — pods are waiting for this file."""
+    from kubernetes.stream import stream as k8s_stream
+    core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
+    for ns, pn in zip(namespaces, pod_names):
+        try:
+            k8s_stream(
+                core.connect_get_namespaced_pod_exec,
+                pn, ns,
+                command=["touch", "/tmp/jenease-start"],
+                stderr=True, stdin=False, stdout=True, tty=False,
+            )
+        except Exception:
+            pass
+    api_client.close()
+
+
+def _sync_create_resources_only(
+    kubeconfig_url: str,
+    namespace: str,
+    pvc_name: str,
+    pod_name: str,
+    workload_type: str,
+    size_gb: int,
+    mode: str,
+    pattern: str = "sequential",
+    block_size: str = "1m",
+    num_jobs: int = 4,
+    iodepth: int = 32,
+    duration_sec: int = 0,
+    obj_size_mb: int = 64,
+    workers: int = 8,
+    engine: str = "libaio",
+    direct: bool = True,
+):
+    """Create k8s resources for a synced workload (sync CM + poll script in pod command)."""
+    from kubernetes import client
+    core, custom, _, api_client = _sync_load_k8s(kubeconfig_url)
+    rbac = client.RbacAuthorizationV1Api(api_client)
+
+    # Namespace
+    try:
+        core.create_namespace(client.V1Namespace(metadata=client.V1ObjectMeta(name=namespace)))
+    except Exception:
+        pass
+
+    # anyuid SCC
+    try:
+        rbac.create_namespaced_role_binding(namespace, client.V1RoleBinding(
+            metadata=client.V1ObjectMeta(name="jenease-anyuid", namespace=namespace),
+            subjects=[client.V1Subject(kind="ServiceAccount", name="default", namespace=namespace)],
+            role_ref=client.V1RoleRef(api_group="rbac.authorization.k8s.io", kind="ClusterRole", name="system:openshift:scc:anyuid"),
+        ))
+    except Exception:
+        pass
+
+    # Sync CM + RBAC
+    _sync_setup_sync_configmap(core, rbac, client, namespace)
+
+    if workload_type == "noobaa":
+        # OBC
+        custom.create_namespaced_custom_object(
+            group="objectbucket.io", version="v1alpha1", namespace=namespace, plural="objectbucketclaims",
+            body={"apiVersion": "objectbucket.io/v1alpha1", "kind": "ObjectBucketClaim",
+                  "metadata": {"name": pvc_name, "namespace": namespace},
+                  "spec": {"generateBucketName": "jenease-bucket", "storageClassName": "openshift-storage.noobaa.io"}},
+        )
+        # Wait for bound
+        for _ in range(60):
+            time.sleep(2)
+            try:
+                obc = custom.get_namespaced_custom_object("objectbucket.io", "v1alpha1", namespace, "objectbucketclaims", pvc_name)
+                if obc.get("status", {}).get("phase") == "Bound":
+                    break
+            except Exception:
+                pass
+        import base64
+        def _dec(v): return base64.b64decode(v).decode() if v else ""
+        secret = core.read_namespaced_secret(pvc_name, namespace)
+        cm = core.read_namespaced_config_map(pvc_name, namespace)
+        access_key  = _dec(secret.data.get("AWS_ACCESS_KEY_ID", ""))
+        secret_key  = _dec(secret.data.get("AWS_SECRET_ACCESS_KEY", ""))
+        bucket_name = cm.data.get("BUCKET_NAME", "jenease-bucket")
+        bucket_host = cm.data.get("BUCKET_HOST", "s3.openshift-storage.svc")
+        bucket_port = cm.data.get("BUCKET_PORT", "80")
+        protocol    = "https" if bucket_port in ("443", "8443") else "http"
+        s3_endpoint = f"{protocol}://{bucket_host}:{bucket_port}"
+        script_b64  = __import__("base64").b64encode(_NOOBAA_SCRIPT.encode()).decode()
+        script_cmd  = f"pip install boto3 --quiet 2>/dev/null && echo '{script_b64}' | base64 -d | python3"
+        pod = client.V1Pod(
+            metadata=client.V1ObjectMeta(name=pod_name, namespace=namespace),
+            spec=client.V1PodSpec(
+                restart_policy="Never",
+                containers=[client.V1Container(
+                    name="noobaa-io", image=NOOBAA_IMAGE,
+                    command=["/bin/bash", "-c", SYNC_POLL_CMD + script_cmd],
+                    env=[
+                        client.V1EnvVar(name="S3_ENDPOINT", value=s3_endpoint),
+                        client.V1EnvVar(name="ACCESS_KEY",  value=access_key),
+                        client.V1EnvVar(name="SECRET_KEY",  value=secret_key),
+                        client.V1EnvVar(name="BUCKET_NAME", value=bucket_name),
+                        client.V1EnvVar(name="SIZE_GB",     value=str(size_gb)),
+                        client.V1EnvVar(name="MODE",        value=mode),
+                        client.V1EnvVar(name="OBJ_SIZE_MB", value=str(obj_size_mb)),
+                        client.V1EnvVar(name="WORKERS",     value=str(workers)),
+                    ],
+                )],
+            ),
+        )
+    else:
+        sc = STORAGE_CLASSES[workload_type]
+        acc_mode = ACCESS_MODES[workload_type]
+        core.create_namespaced_persistent_volume_claim(namespace, client.V1PersistentVolumeClaim(
+            metadata=client.V1ObjectMeta(name=pvc_name),
+            spec=client.V1PersistentVolumeClaimSpec(
+                access_modes=[acc_mode], storage_class_name=sc,
+                resources=client.V1ResourceRequirements(requests={"storage": f"{size_gb}Gi"}),
+            ),
+        ))
+        fio_rw     = FIO_RW.get((mode, pattern), "write")
+        per_job_gb = max(1, size_gb // num_jobs)
+        duration_desc = f"{duration_sec}s" if duration_sec > 0 else f"{per_job_gb}GB"
+        time_flags  = f"--time_based --runtime={duration_sec}" if duration_sec > 0 else ""
+        direct_flag = "--direct=1" if direct else ""
+        fio_cmd = (
+            f"fio --name=jenease --ioengine={engine} {direct_flag} "
+            f"--bs={block_size} --numjobs={num_jobs} --iodepth={iodepth} --rw={fio_rw} "
+            f"--size={per_job_gb}g {time_flags} "
+            f"--filename=/data/testfile --fallocate=none --status-interval=2 --group_reporting"
+        ).strip()
+        wrapped = f"script -q -c '{fio_cmd}' /dev/null 2>&1" if direct_flag else f"{fio_cmd} 2>&1"
+        prefill = ""
+        if mode == "read":
+            mb = size_gb * 1024
+            prefill = (f"echo '[jenease] Pre-filling {size_gb}GB...' && "
+                       f"dd if=/dev/zero of=/data/testfile bs=64M count={mb // 64 + 1} 2>&1 | "
+                       f"grep -v '^$' | while IFS= read -r l; do echo \"[PREFILL] $l\"; done && ")
+        cmd = (
+            f"echo '[jenease] Starting fio ({fio_rw}, bs={block_size}, {num_jobs} jobs × {duration_desc}, "
+            f"iodepth={iodepth}, engine={engine})...' && {prefill}{wrapped} && echo '[jenease] Workload complete.'"
+        )
+        pod = client.V1Pod(
+            metadata=client.V1ObjectMeta(name=pod_name, namespace=namespace),
+            spec=client.V1PodSpec(
+                restart_policy="Never",
+                security_context=client.V1PodSecurityContext(run_as_user=0, run_as_group=0, fs_group=0),
+                containers=[client.V1Container(
+                    name="io", image=IO_IMAGE,
+                    command=["/bin/bash", "-c", SYNC_POLL_CMD + cmd],
+                    env=[client.V1EnvVar(name="SIZE_GB", value=str(size_gb))],
+                    security_context=client.V1SecurityContext(run_as_user=0, allow_privilege_escalation=False),
+                    volume_mounts=[client.V1VolumeMount(name="data", mount_path="/data")],
+                )],
+                volumes=[client.V1Volume(name="data",
+                    persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(claim_name=pvc_name))],
+            ),
+        )
+
+    core.create_namespaced_pod(namespace, pod)
+    api_client.close()
+
+
+async def sync_create_all_workloads(
+    kubeconfig_url: str,
+    specs: list[dict],
+) -> None:
+    """Create all workload resources in parallel, then signal when all pods are Running."""
+    loop = asyncio.get_event_loop()
+
+    # Create all resources concurrently
+    await asyncio.gather(*[
+        loop.run_in_executor(None, _sync_create_resources_only, kubeconfig_url, **s)
+        for s in specs
+    ])
+
+    namespaces = [s["namespace"] for s in specs]
+    pod_names  = [s["pod_name"]  for s in specs]
+
+    # Orchestrate: wait for all pods Running, then signal
+    def _orchestrate():
+        core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
+        # Poll until all pods are Running (up to 10 min)
+        for _ in range(300):
+            time.sleep(2)
+            try:
+                ready = True
+                for ns, pn in zip(namespaces, pod_names):
+                    pod = core.read_namespaced_pod(pn, ns)
+                    cs  = pod.status.container_statuses or []
+                    if not any(c.state and c.state.running for c in cs):
+                        ready = False
+                        break
+                if ready:
+                    break
+            except Exception:
+                pass
+
+        # Flip all sync CMs to start=true
+        for ns in namespaces:
+            try:
+                core.patch_namespaced_config_map("jenease-sync", ns, {"data": {"start": "true"}})
+            except Exception:
+                pass
+        api_client.close()
+
+    asyncio.create_task(loop.run_in_executor(None, _orchestrate))
+
+
+def _sync_check_image_status(kubeconfig_url: str) -> dict:
+    """Check image cache using imagePullPolicy:Never DaemonSet — accurate, no kubelet delay."""
+    from kubernetes import client as _k8s
+    core, _, _cfg, api_client = _sync_load_k8s(kubeconfig_url)
+    apps_v1 = _k8s.AppsV1Api(api_client)
+    ns = "jenease-prepull"
+    ds_name = "jenease-imgcheck"
+
+    try:
+        core.create_namespace(_k8s.V1Namespace(metadata=_k8s.V1ObjectMeta(name=ns)))
+    except Exception:
+        pass
+    try:
+        apps_v1.delete_namespaced_daemon_set(ds_name, ns, body=_k8s.V1DeleteOptions(propagation_policy="Background"))
+        time.sleep(3)
+    except Exception:
+        pass
+
+    ds = _k8s.V1DaemonSet(
+        metadata=_k8s.V1ObjectMeta(name=ds_name, namespace=ns),
+        spec=_k8s.V1DaemonSetSpec(
+            selector=_k8s.V1LabelSelector(match_labels={"app": ds_name}),
+            template=_k8s.V1PodTemplateSpec(
+                metadata=_k8s.V1ObjectMeta(labels={"app": ds_name}),
+                spec=_k8s.V1PodSpec(
+                    tolerations=[_k8s.V1Toleration(operator="Exists")],
+                    node_selector={"node-role.kubernetes.io/worker": ""},
+                    # Two parallel containers with Never pull — ErrImageNeverPull = not cached
+                    containers=[
+                        _k8s.V1Container(name="check-fio",    image=IO_IMAGE,     command=["sleep", "30"], image_pull_policy="Never"),
+                        _k8s.V1Container(name="check-noobaa", image=NOOBAA_IMAGE, command=["sleep", "30"], image_pull_policy="Never"),
+                    ],
+                ),
+            ),
+        ),
+    )
+    apps_v1.create_namespaced_daemon_set(ns, ds)
+
+    # Wait up to 30s for all pod containers to reach a definitive state
+    result_by_node: dict[str, dict] = {}
+    all_worker_nodes = [n.metadata.name for n in core.list_node(label_selector="node-role.kubernetes.io/worker=").items]
+    for _ in range(10):
+        time.sleep(3)
+        pods = core.list_namespaced_pod(ns, label_selector=f"app={ds_name}")
+        for pod in pods.items:
+            node = pod.spec.node_name
+            if not node:
+                continue
+            node_result: dict[str, bool | None] = {"fio": None, "noobaa": None}
+            for cs in (pod.status.container_statuses or []):
+                if cs.state and cs.state.waiting and cs.state.waiting.reason == "ErrImageNeverPull":
+                    cached = False
+                elif cs.state and (cs.state.running or cs.state.terminated):
+                    cached = True
+                else:
+                    cached = None  # not yet determined
+                if cs.name == "check-fio":
+                    node_result["fio"] = cached
+                elif cs.name == "check-noobaa":
+                    node_result["noobaa"] = cached
+            if node_result["fio"] is not None and node_result["noobaa"] is not None:
+                result_by_node[node] = {"fio": bool(node_result["fio"]), "noobaa": bool(node_result["noobaa"])}
+        if all(n in result_by_node for n in all_worker_nodes):
+            break
+
+    try:
+        apps_v1.delete_namespaced_daemon_set(ds_name, ns, body=_k8s.V1DeleteOptions(propagation_policy="Background"))
+    except Exception:
+        pass
+    api_client.close()
+
+    result = [
+        {"name": n, **result_by_node.get(n, {"fio": False, "noobaa": False})}
+        for n in all_worker_nodes
+    ]
+    return {"nodes": result, "all_cached": all(n["fio"] and n["noobaa"] for n in result)}
+
+
+async def check_image_status(kubeconfig_url: str) -> dict:
+    loop = asyncio.get_event_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(None, _sync_check_image_status, kubeconfig_url),
+        timeout=60.0,
+    )
+
+
 def _sync_prepull_images(kubeconfig_url: str) -> str:
     """Create a DaemonSet on all workers to pre-pull fio + NooBaa images. Returns status."""
     from kubernetes import client as _k8s
@@ -752,11 +1421,11 @@ def _sync_prepull_images(kubeconfig_url: str) -> str:
                     tolerations=[_k8s.V1Toleration(operator="Exists")],
                     # Two init containers pull the images; main container is trivial
                     init_containers=[
-                        _k8s.V1Container(name="pull-fio",    image=IO_IMAGE,     command=["echo", "fio ready"],    image_pull_policy="IfNotPresent"),
-                        _k8s.V1Container(name="pull-noobaa", image=NOOBAA_IMAGE, command=["echo", "noobaa ready"], image_pull_policy="IfNotPresent"),
+                        _k8s.V1Container(name="pull-fio",    image=IO_IMAGE,     command=["echo", "fio ready"],    image_pull_policy="Always"),
+                        _k8s.V1Container(name="pull-noobaa", image=NOOBAA_IMAGE, command=["echo", "noobaa ready"], image_pull_policy="Always"),
                     ],
                     containers=[_k8s.V1Container(
-                        name="done", image="busybox:latest",
+                        name="done", image=IO_IMAGE,
                         command=["sh", "-c", "echo images cached && sleep 10"],
                         image_pull_policy="IfNotPresent",
                     )],
@@ -793,7 +1462,7 @@ async def prepull_workload_image(kubeconfig_url: str) -> str:
     )
 
 
-def parse_fio_line(line: str, size_bytes: int = 0) -> dict:
+def parse_fio_line(line: str, size_bytes: int = 0, fio_state: dict | None = None) -> dict:
     """Extract progress %, IO rate, and ETA from a fio status line (TTY or non-TTY format)."""
     result: dict = {"line": line}
 
@@ -810,6 +1479,10 @@ def parse_fio_line(line: str, size_bytes: int = 0) -> dict:
     if e:
         result["eta"] = e.group(1)
 
+    # Workload completion — always 100%
+    if "Workload complete." in line:
+        result["progress"] = 100.0
+
     # Non-TTY summary line: write: IOPS=53, BW=6887KiB/s (7052kB/s)(672MiB/99884msec)
     if "rate" not in result:
         bw = re.search(r'[Bb][Ww]=(\d+(?:\.\d+)?)(KiB|MiB|GiB)/s', line)
@@ -817,6 +1490,26 @@ def parse_fio_line(line: str, size_bytes: int = 0) -> dict:
             val, unit = float(bw.group(1)), bw.group(2)
             mb = val / 1024 if unit == 'KiB' else val * 1024 if unit == 'GiB' else val
             result["rate"] = f"{mb:.0f}MiB/s"
+
+    # Disk stats line: "rbd3: ios=6/23, sectors=56/36992, ..."
+    # Compute instantaneous rate from delta of cumulative write sectors between intervals.
+    if fio_state is not None:
+        disk_m = re.search(r'sectors=\d+/(\d+)', line)
+        if disk_m:
+            now = time.time()
+            curr_w = int(disk_m.group(1))
+            prev_w = fio_state.get("prev_w", 0)
+            prev_t = fio_state.get("prev_t", now)
+            if curr_w > prev_w:
+                delta_bytes = (curr_w - prev_w) * 512
+                delta_t = now - prev_t
+                if "rate" not in result and delta_t > 0:
+                    rate_mb = delta_bytes / delta_t / 1_048_576
+                    result["rate"] = f"{rate_mb:.1f}MiB/s"
+                fio_state["prev_w"] = curr_w
+                fio_state["prev_t"] = now
+            if "progress" not in result and size_bytes > 0 and curr_w > 0:
+                result["progress"] = min(99.9, (curr_w * 512) / size_bytes * 100)
 
     # Compute progress from io= in non-TTY summary lines when size_bytes known
     if "progress" not in result and size_bytes > 0:

@@ -29,8 +29,19 @@ class JenkinsClient:
 
     async def validate(self) -> dict:
         username = self.auth[0]
+        url = f"{self.base}/user/{username}/api/json"
         async with self._client() as c:
-            r = await c.get(f"{self.base}/user/{username}/api/json")
+            r = await c.get(url)
+            if r.status_code == 200:
+                return r.json()
+            # Some Jenkins instances (SSO-only) reject Basic Auth but allow anonymous reads.
+            # Fall back to an unauthenticated check to confirm the user exists.
+            if r.status_code in (401, 403):
+                anon = httpx.AsyncClient(**_CLIENT_DEFAULTS)
+                async with anon:
+                    r2 = await anon.get(url)
+                if r2.status_code == 200:
+                    return r2.json()
             r.raise_for_status()
             return r.json()
 

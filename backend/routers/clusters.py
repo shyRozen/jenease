@@ -5,12 +5,12 @@ from datetime import datetime
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 
 from auth import get_session
 from cluster_health import _parse_topology, fetch_cluster_details, fetch_cluster_health, fetch_cluster_iops
-from workload_runner import prepull_workload_image
+from workload_runner import check_image_status, prepull_workload_image
 from jenkins import JenkinsClient
 from config import settings
 
@@ -435,17 +435,37 @@ async def cluster_health(cluster_name: str, session: dict = Depends(get_session)
     }
 
 
-@router.post("/{cluster_name}/prepull")
-async def prepull_images(cluster_name: str, session: dict = Depends(get_session)):
-    """Pre-pull the fio workload image on all worker nodes via a DaemonSet."""
+@router.get("/{cluster_name}/image-status")
+async def image_status_endpoint(cluster_name: str, session: dict = Depends(get_session)):
+    """Check which worker nodes have fio + NooBaa images cached (no pods created)."""
     jenkins = _make_client(session)
     builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
     for b in builds:
         if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
             parsed = JenkinsClient.parse_build_description(b.get("description", "") or "")
             if parsed.get("kubeconfig_url"):
-                msg = await prepull_workload_image(parsed["kubeconfig_url"])
-                return {"ok": True, "message": msg}
+                try:
+                    return await check_image_status(parsed["kubeconfig_url"])
+                except Exception as e:
+                    raise HTTPException(502, f"Could not check image status: {e}")
+    raise HTTPException(404, "Cluster kubeconfig not found")
+
+
+@router.post("/{cluster_name}/prepull")
+async def prepull_images(
+    cluster_name: str,
+    background_tasks: BackgroundTasks,
+    session: dict = Depends(get_session),
+):
+    """Pre-pull fio + NooBaa images on all worker nodes via a DaemonSet (fire-and-forget)."""
+    jenkins = _make_client(session)
+    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+    for b in builds:
+        if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+            parsed = JenkinsClient.parse_build_description(b.get("description", "") or "")
+            if parsed.get("kubeconfig_url"):
+                background_tasks.add_task(prepull_workload_image, parsed["kubeconfig_url"])
+                return {"ok": True, "message": "Pre-pull started — images will be ready on all nodes in ~5 minutes"}
     raise HTTPException(404, "Cluster kubeconfig not found")
 
 

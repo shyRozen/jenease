@@ -74,18 +74,42 @@ RLocker (locker queue status, no auth needed)
   - CephFS default: libaio, no `--direct=1` (O_DIRECT not supported on CephFS)
   - Per-job size = total_size / numjobs (prevents 4× PVC overflow)
 - **NooBaa**: `ubi9/python-311` + boto3; configurable object size (1–256MB) and workers (1–32)
+- **Workload terminal** streams per-step creation status with elapsed time prefix:
+  - `[+0s] Connecting to cluster → [+1s] ✓ Connected → [+2s] Creating namespace jenease-wl-XXXX → Creating PVC → Creating pod → pod pending states → fio output`
+  - Each line prefixed with `[+Xs]` elapsed since the stream opened
+- Live progress bar uses actual write size (`per_job_gb × num_jobs`), not PVC size — fixes a stall at 80% when numjobs > 1
+- Progress forced to 100% when "Workload complete." message is received
+- Rate extracted from fio disk-stats sectors delta when the compact progress line omits it (slow IO case)
 - Live log terminal (SSE), progress bar, rate in MB/s
 - **Throughput chart**: live SVG, RBD/CephFS/NooBaa/Total lines, 60s window, drag-scrollable
 - Cleanup: pod → OBC finalizer → PVC → namespace (shown in log terminal)
 - Purge button for orphaned `jenease-wl-*` namespaces
-- **⬇ Pre-pull image on all nodes**: DaemonSet-based cache warmer for fio + NooBaa images — run once per cluster to avoid 3-6 min image pull delays on uncached nodes
 - Workload namespace uses `uuid4` (not timestamp) to prevent concurrent-launch name collisions
+- **Ceph health indicator**: `● CEPH HEALTH_OK` / `⚠ CEPH HEALTH_WARN` shown above workload cards while any workload is running; polls every 2 seconds
+- **Clear All button**: shown above the workload list with Confirm/Cancel — triggers simultaneous cleanup on all cards; each card shows cleanup stages in its own terminal
+
+### Image Cache Status
+- Per-node image cache badges shown at the top of the workload launcher (e.g., `compute-0 ✓`, `compute-1 ⚠`)
+- Hover tooltip on a warning badge lists the specific image missing on that node
+- Status checked via a `imagePullPolicy:Never` DaemonSet — accurate with no kubelet reconciliation delay
+- Pre-pull button only appears when at least one node is missing a required image
+- **Auto-prepull on login**: for each accessible owned cluster, image status is checked and a prepull is fired automatically if any node is missing an image; fire-and-forget, status auto-refreshes every 30s after clicking
+- Pre-pull mechanism: DaemonSet-based cache warmer for fio + NooBaa images — eliminates 3–6 min image pull delays on uncached nodes
 
 ### Workload Sessions Recording
 - **Record** button in workload panel captures throughput (1s samples) + workload events with timing
+- Recording snapshots any already-running workloads at `offset_ms=0` when recording starts
+- Workload deletions recorded as `type:delete` events with precise timing
 - **Play Graph**: floating modal, auto-plays, speed 1x/2x/5x/10x/Max, rAF-based animation
-- **Deploy**: re-launches the recorded sequence on any cluster with original timing
+- **Deploy**: re-launches the recorded sequence on any cluster with original timing; handles delete events by FIFO-matching by workload type and triggering cleanup at the same elapsed offset as the original
+- If a manual recording is active (Start Recording button), launching a sequence also records into that session automatically
 - Sessions stored in SQLite, survive page navigation; throughput requires page open
+
+### Session Replay Graph
+- Workload event markers show correlated lifecycle: fast pulse (2Hz, 3s) on launch → slow pulse (0.5Hz) while running → no pulse when deleted
+- Blink is driven by `currentMs` so it pauses correctly when playback is paused
+- Delete events shown as `✕ +1:02 RBD deleted` in red; an upcoming deletion is shown inline on the marker as `→✕ +1:02`
+- Line-through styling applied to deleted workload markers
 
 ### Workload Sequences
 - **+ Add to Sequence**: captures current form params into a timed step list
@@ -93,6 +117,10 @@ RLocker (locker queue status, no auth needed)
 - **Run**: fires each workload at its offset using `setTimeout`; optional "Start recording with sequence" checkbox
 - **Save/Load**: sequences stored globally in SQLite, visible to owner by default; "Load all sequences" expands to all users
 - Saved sequences show Load / ▶ Run / trash buttons; delete only for owner
+- **⚡ Sync IO start** checkbox in the sequence panel: when checked, all workloads in the sequence are created simultaneously and ALL pods must reach Running before IO begins on any of them
+  - Mechanism: pods poll `/tmp/jenease-start`; backend execs `touch /tmp/jenease-start` into all pods once all are Running
+  - NooBaa special handling: pip install + boto3 setup runs before the sync wait (pod signals `/tmp/noobaa-ready`); backend waits for this signal before counting a NooBaa pod as ready
+  - Ensures true simultaneous IO start across RBD, CephFS, and NooBaa workloads
 
 ### All Clusters Page (`/all-clusters`)
 - Shows ALL active clusters across all Jenkins users (not just yours)
@@ -130,6 +158,7 @@ RLocker (locker queue status, no auth needed)
 - Login: Jenkins username + API token, **Remember me** checkbox (default: 30-day cookie)
 - Token in signed httpOnly cookie, never on server
 - 401 from Jenkins → clears cookie → login page
+- **Stage Jenkins SSO support**: if `/user/{username}/api/json` returns 401 with Basic Auth but 200 anonymously (SSO-only Jenkins), login falls back to an anonymous user lookup — allows stage Jenkins tokens to work alongside the primary Jenkins instance
 
 ---
 
@@ -170,6 +199,8 @@ npm run dev -- --port 5199
 
 ### Kubeconfig & Proxy
 Kubeconfig served from an internal NFS HTTP server contains `proxy-url` for IPv6 clusters. Python k8s client ignores it — extracted and set manually. OAuth token for Prometheus also fetched through the proxy.
+
+The kubeconfig URL is passed directly from the frontend using the active clusters cache — no longer requires scanning Jenkins builds to locate it. Kubeconfig content is cached for 1 hour to avoid re-downloading from NFS on every k8s operation.
 
 ### Prometheus IOPS
 - `irate(ceph_osd_op_r/w[15s])` via Thanos external route
@@ -215,7 +246,7 @@ jenease/
 │   │   ├── components/
 │   │   │   ├── ClusterCard.tsx   # Health + stage + degraded_reason display
 │   │   │   ├── DestroyDrawer.tsx
-│   │   │   ├── WorkloadPanel.tsx # Launcher + workload list
+│   │   │   ├── WorkloadPanel.tsx # Launcher + workload list + image cache status
 │   │   │   └── ThroughputChart.tsx  # Live SVG throughput chart
 │   │   └── pages/
 │   │       ├── AllClusters.tsx   # All clusters page

@@ -88,6 +88,7 @@ def start_session(body: StartRequest, auth: dict = Depends(get_session)):
                 "duration_sec": 0,
                 "obj_size_mb": 64,
                 "workers": 8,
+                "node_name": "",
             }
             for w in running
         ]

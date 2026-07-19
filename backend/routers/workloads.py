@@ -77,6 +77,8 @@ class CreateWorkloadRequest(BaseModel):
     # fio IO engine (rbd/cephfs only)
     engine: str = "libaio"      # psync | posixaio | io_uring | libaio
     direct: bool = True         # --direct=1 (bypass page cache)
+    # Node pin (empty = let scheduler decide)
+    node_name: Optional[str] = None
     # Recording
     session_id: Optional[int] = None
     # Pass kubeconfig_url from the frontend to skip scanning 200 Jenkins builds
@@ -96,6 +98,7 @@ class SyncLaunchItem(BaseModel):
     workers: int = 8
     engine: str = "libaio"
     direct: bool = True
+    node_name: Optional[str] = None
     offset_sec: float = 0  # kept for compatibility, ignored in sync mode
 
 class SyncLaunchRequest(BaseModel):
@@ -169,6 +172,7 @@ async def create(
                         "duration_sec": body.duration_sec,
                         "obj_size_mb": body.obj_size_mb,
                         "workers": body.workers,
+                        "node_name": body.node_name or "",
                     })
                     ws.events = json.dumps(events)
                     db.add(ws)
@@ -195,6 +199,7 @@ async def create(
         "workers":        body.workers,
         "engine":         body.engine,
         "direct":         body.direct,
+        "node_name":      body.node_name or "",
     }
 
     return {"id": wid, "namespace": namespace, "pod_name": pod_name}
@@ -252,6 +257,7 @@ async def sync_launch(
                 "num_jobs": item.num_jobs, "iodepth": item.iodepth,
                 "duration_sec": item.duration_sec, "obj_size_mb": item.obj_size_mb,
                 "workers": item.workers, "engine": item.engine, "direct": item.direct,
+                "node_name": item.node_name or "",
                 "synced": True, "sync_id": sync_id,
             }
             workload_ids.append(w.id)
@@ -290,6 +296,7 @@ async def sync_launch(
                             "duration_sec": item.duration_sec,
                             "obj_size_mb": item.obj_size_mb,
                             "workers": item.workers,
+                            "node_name": item.node_name or "",
                             "synced": True,
                         })
                     ws.events = json.dumps(events)

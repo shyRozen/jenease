@@ -773,6 +773,7 @@ async def create_and_stream_workload(
     direct: bool = True,
     synced: bool = False,
     sync_id: str = "",
+    node_name: str = "",
     **_extra,  # absorb unknown keys from _PENDING_PARAMS
 ) -> AsyncGenerator[str, None]:
     """Create k8s resources with per-step status messages, then stream pod logs."""
@@ -881,6 +882,7 @@ async def create_and_stream_workload(
                     metadata=client.V1ObjectMeta(name=pod_name, namespace=namespace),
                     spec=client.V1PodSpec(
                         restart_policy="Never",
+                        node_name=node_name or None,
                         containers=[client.V1Container(
                             name="noobaa-io", image=NOOBAA_IMAGE,
                             command=["/bin/bash", "-c", final_noobaa_cmd],
@@ -942,6 +944,7 @@ async def create_and_stream_workload(
                     metadata=client.V1ObjectMeta(name=pod_name, namespace=namespace),
                     spec=client.V1PodSpec(
                         restart_policy="Never",
+                        node_name=node_name or None,
                         security_context=client.V1PodSecurityContext(run_as_user=0, run_as_group=0, fs_group=0),
                         containers=[client.V1Container(
                             name="io", image=IO_IMAGE,
@@ -1012,6 +1015,14 @@ async def create_and_stream_workload(
                 except Exception:
                     pass
                 time.sleep(2)
+
+            # Emit which node the pod landed on (always — confirms pin or reveals scheduler choice)
+            try:
+                actual_node = pod.spec.node_name or ""
+                if actual_node:
+                    emit(f"[jenease] ↳ Running on {actual_node}")
+            except Exception:
+                pass
 
             # ── Sync group signaling ─────────────────────────────────────────
             if synced and sync_id and sync_id in _SYNC_GROUPS:
@@ -1135,6 +1146,8 @@ def _sync_create_resources_only(
     workers: int = 8,
     engine: str = "libaio",
     direct: bool = True,
+    node_name: str = "",
+    **_extra,
 ):
     """Create k8s resources for a synced workload (sync CM + poll script in pod command)."""
     from kubernetes import client
@@ -1194,6 +1207,7 @@ def _sync_create_resources_only(
             metadata=client.V1ObjectMeta(name=pod_name, namespace=namespace),
             spec=client.V1PodSpec(
                 restart_policy="Never",
+                node_name=node_name or None,
                 containers=[client.V1Container(
                     name="noobaa-io", image=NOOBAA_IMAGE,
                     command=["/bin/bash", "-c", SYNC_POLL_CMD + script_cmd],
@@ -1246,6 +1260,7 @@ def _sync_create_resources_only(
             metadata=client.V1ObjectMeta(name=pod_name, namespace=namespace),
             spec=client.V1PodSpec(
                 restart_policy="Never",
+                node_name=node_name or None,
                 security_context=client.V1PodSecurityContext(run_as_user=0, run_as_group=0, fs_group=0),
                 containers=[client.V1Container(
                     name="io", image=IO_IMAGE,

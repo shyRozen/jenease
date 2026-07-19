@@ -391,16 +391,17 @@ async def cluster_health(cluster_name: str, session: dict = Depends(get_session)
         degraded_reason = None
     else:
         status = "DEGRADED"
-        # Priority: osd_down > ceph_err > node_not_ready > odf_error >
-        #           node_pressure > ceph_warn > odf_progressing > node_unschedulable
-        if osd_count > 0 and osd_up < osd_count:
-            degraded_reason = "osd_down"
-        elif ceph_health == "HEALTH_ERR":
+        # Priority: ceph_health is the most authoritative source — check it first.
+        # osd_down/osd_not_in are secondary: they only apply when Ceph itself is healthy
+        # but the counts disagree (e.g. pod count vs Ceph view mismatch).
+        if ceph_health == "HEALTH_ERR":
             degraded_reason = "ceph_err"
         elif any(not n["ready"] for n in nodes):
             degraded_reason = "node_not_ready"
         elif odf_phase in ("Error", "Failed"):
             degraded_reason = "odf_error"
+        elif osd_count > 0 and osd_up < osd_count:
+            degraded_reason = "osd_down"
         elif any(
             c in str(n.get("conditions", {}))
             for n in nodes
@@ -435,6 +436,43 @@ async def cluster_health(cluster_name: str, session: dict = Depends(get_session)
     }
 
 
+_WORKER_NODES_CACHE: dict[str, tuple[dict, float]] = {}
+_WORKER_NODES_TTL = 60
+
+
+@router.get("/{cluster_name}/worker-nodes")
+async def worker_nodes_endpoint(
+    cluster_name: str,
+    kubeconfig_url: Optional[str] = None,
+    session: dict = Depends(get_session),
+):
+    """List worker nodes with image cache status. Pass ?kubeconfig_url= to skip Jenkins scan."""
+    import time as _time
+    cached = _WORKER_NODES_CACHE.get(cluster_name)
+    if cached and _time.monotonic() - cached[1] < _WORKER_NODES_TTL:
+        return cached[0]
+
+    if not kubeconfig_url:
+        jenkins = _make_client(session)
+        builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+        for b in builds:
+            if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+                parsed = JenkinsClient.parse_build_description(b.get("description", "") or "")
+                if parsed.get("kubeconfig_url"):
+                    kubeconfig_url = parsed["kubeconfig_url"]
+                    break
+    if not kubeconfig_url:
+        raise HTTPException(404, "Cluster kubeconfig not found")
+
+    try:
+        image_status = await check_image_status(kubeconfig_url)
+        result = {"nodes": image_status.get("nodes", [])}
+        _WORKER_NODES_CACHE[cluster_name] = (result, _time.monotonic())
+        return result
+    except Exception as e:
+        raise HTTPException(502, f"Could not list worker nodes: {e}")
+
+
 @router.get("/{cluster_name}/image-status")
 async def image_status_endpoint(cluster_name: str, session: dict = Depends(get_session)):
     """Check which worker nodes have fio + NooBaa images cached (no pods created)."""
@@ -449,6 +487,127 @@ async def image_status_endpoint(cluster_name: str, session: dict = Depends(get_s
                 except Exception as e:
                     raise HTTPException(502, f"Could not check image status: {e}")
     raise HTTPException(404, "Cluster kubeconfig not found")
+
+
+def _run_fstrim(kubeconfig_url: str) -> str:
+    """Create a privileged pod on each worker node to run fstrim -v /.
+    Uses nsenter to enter the node's mount namespace — works on thin-provisioned
+    vSphere/cloud VMs to release discarded blocks back to the hypervisor."""
+    from workload_runner import _sync_load_k8s
+    import uuid as _uuid, time as _time
+    from kubernetes import client as _k8s
+
+    core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
+    rbac = _k8s.RbacAuthorizationV1Api(api_client)
+
+    ns = "jenease-fstrim"
+    uid = _uuid.uuid4().hex[:6]
+    results: list[str] = []
+
+    try:
+        # Namespace
+        try:
+            core.create_namespace(_k8s.V1Namespace(metadata=_k8s.V1ObjectMeta(name=ns)))
+        except Exception:
+            pass
+
+        # Privileged SCC — required to run nsenter on host
+        try:
+            rbac.create_cluster_role_binding(_k8s.V1ClusterRoleBinding(
+                metadata=_k8s.V1ObjectMeta(name=f"jenease-fstrim-{uid}"),
+                subjects=[_k8s.V1Subject(kind="ServiceAccount", name="default", namespace=ns)],
+                role_ref=_k8s.V1RoleRef(
+                    api_group="rbac.authorization.k8s.io",
+                    kind="ClusterRole",
+                    name="system:openshift:scc:privileged",
+                ),
+            ))
+        except Exception:
+            pass
+
+        # List worker nodes
+        workers = core.list_node(label_selector="node-role.kubernetes.io/worker=").items
+        if not workers:
+            return "ERROR: No worker nodes found"
+
+        # Create one pod per worker node
+        pod_names: list[tuple[str, str]] = []  # (pod_name, node_name)
+        for node in workers:
+            node_name = node.metadata.name
+            pod_name  = f"jenease-fstrim-{uid}-{node_name.split('.')[0][-12:]}"
+            pod = _k8s.V1Pod(
+                metadata=_k8s.V1ObjectMeta(name=pod_name, namespace=ns),
+                spec=_k8s.V1PodSpec(
+                    node_name=node_name,
+                    host_pid=True,
+                    restart_policy="Never",
+                    containers=[_k8s.V1Container(
+                        name="fstrim",
+                        image="registry.access.redhat.com/ubi9/ubi-minimal:latest",
+                        command=["sh", "-c",
+                            "nsenter --mount=/proc/1/ns/mnt -- fstrim -v / 2>&1 || "
+                            "nsenter -t 1 -m -- fstrim -v / 2>&1"],
+                        security_context=_k8s.V1SecurityContext(privileged=True),
+                    )],
+                    tolerations=[_k8s.V1Toleration(operator="Exists")],
+                ),
+            )
+            try:
+                core.create_namespaced_pod(ns, pod)
+                pod_names.append((pod_name, node_name))
+            except Exception as e:
+                results.append(f"{node_name}: ERROR creating pod — {e}")
+
+        # Wait up to 120s for all pods to finish
+        deadline = _time.monotonic() + 120
+        pending = set(n for n, _ in pod_names)
+        while pending and _time.monotonic() < deadline:
+            _time.sleep(3)
+            for pod_name, node_name in pod_names:
+                if pod_name not in pending:
+                    continue
+                try:
+                    p = core.read_namespaced_pod(pod_name, ns)
+                    if p.status.phase in ("Succeeded", "Failed"):
+                        logs = core.read_namespaced_pod_log(pod_name, ns)
+                        status = "✓" if p.status.phase == "Succeeded" else "⚠"
+                        results.append(f"{status} {node_name}:\n{logs.strip()}")
+                        pending.discard(pod_name)
+                except Exception:
+                    pass
+        for pod_name, node_name in pod_names:
+            if pod_name in pending:
+                results.append(f"⚠ {node_name}: timed out")
+
+        return "\n\n".join(results) if results else "Trim complete (no output)"
+    except Exception as e:
+        return f"ERROR: {e}"
+    finally:
+        # Clean up: delete namespace and cluster role binding
+        try:
+            core.delete_namespace(ns)
+        except Exception:
+            pass
+        try:
+            rbac.delete_cluster_role_binding(f"jenease-fstrim-{uid}")
+        except Exception:
+            pass
+        api_client.close()
+
+
+@router.post("/{cluster_name}/fstrim")
+async def fstrim_storage(
+    cluster_name: str,
+    kubeconfig_url: str,
+    session: dict = Depends(get_session),
+):
+    """Run fstrim on all worker nodes via privileged pods — releases blocks to thin-provisioned storage."""
+    loop = asyncio.get_event_loop()
+    result = await asyncio.wait_for(
+        loop.run_in_executor(None, _run_fstrim, kubeconfig_url),
+        timeout=180.0,
+    )
+    return {"ok": True, "output": result}
 
 
 @router.post("/{cluster_name}/prepull")

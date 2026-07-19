@@ -13,6 +13,7 @@ export interface SessionEvent {
   duration_sec: number
   obj_size_mb: number
   workers: number
+  node_name?: string
 }
 
 export interface ThroughputSample {
@@ -116,6 +117,9 @@ function WorkloadMarkers({ events, currentMs, totalMs }: {
             <span style={{ color }} className="text-[8px]">+{fmtMs(e.offset_ms)}</span>
             {/* Type + params */}
             <span style={{ color }} className="font-semibold">{e.workload_type.toUpperCase()}</span>
+            {e.node_name && (
+              <span className="text-[8px] px-1 rounded" style={{ color, opacity: 0.7 }}>[{e.node_name}]</span>
+            )}
             <span className={isDeleted ? 'text-gray-500 line-through' : 'text-text-muted'}>
               {fmtParams(e)}
             </span>

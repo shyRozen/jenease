@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
-import ThroughputChart, { type DataPoint, SERIES } from './ThroughputChart'
+import ThroughputChart, { type DataPoint, SERIES, RW_SERIES } from './ThroughputChart'
 import SessionReplayModal, { type SessionFull, type SessionEvent } from './SessionReplayModal'
 
 interface SessionSummary {
@@ -228,12 +228,16 @@ export default function WorkloadPanel({
   showLauncher = true,
   showList = true,
   sharedRatesRef,
+  cephAgg,
+  historyRef,
 }: {
   clusterName: string
   kubeconfigUrl?: string
   showLauncher?: boolean
   showList?: boolean
   sharedRatesRef?: React.MutableRefObject<Record<number, number>>
+  cephAgg?: { r: number; w: number }
+  historyRef?: React.MutableRefObject<DataPoint[]>
 }) {
   const queryClient = useQueryClient()
 
@@ -255,12 +259,15 @@ export default function WorkloadPanel({
   const [launching, setLaunching] = useState(false)
   const [launchError, setLaunchError] = useState('')
 
+  // Node pin state
+  const [nodeName, setNodeName] = useState<string>('')
+
   // ── Sequence state ──────────────────────────────────────────────────────
   interface SeqItem {
     id: number; offset_sec: number; workload_type: string; size_gb: number
     mode: string; pattern: string; block_size: string; num_jobs: number
     iodepth: number; duration_sec: number; obj_size_mb: number; workers: number
-    engine: string; direct: boolean
+    engine: string; direct: boolean; node_name?: string
   }
   const [seqItems,    setSeqItems]    = useState<SeqItem[]>([])
   const [seqName,     setSeqName]     = useState('')
@@ -285,6 +292,19 @@ export default function WorkloadPanel({
     refetchInterval: 90_000,
     enabled: showLauncher,
   })
+
+  const { data: workerNodesData } = useQuery<{ nodes: { name: string; fio: boolean; noobaa: boolean }[] }>({
+    queryKey: ['worker-nodes', clusterName],
+    queryFn: () => api.get(`/clusters/${clusterName}/worker-nodes?kubeconfig_url=${encodeURIComponent(kubeconfigUrl ?? '')}`),
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    enabled: showLauncher && !!kubeconfigUrl,
+  })
+  const workerNodes = workerNodesData?.nodes ?? []
+
+  const cephAggRef = useRef<{r: number; w: number}>({r: 0, w: 0})
+  cephAggRef.current = cephAgg ?? {r: 0, w: 0}
+  const [showRW, setShowRW] = useState(false)
 
   const [purging, setPurging] = useState(false)
   const [clearAll, setClearAll] = useState(false)
@@ -338,10 +358,16 @@ export default function WorkloadPanel({
       }
       const total = Object.values(byType).reduce((a, b) => a + b, 0)
       const now = Date.now()
-      setHistory(prev => [...prev.slice(-600), {
-        ts: now, total,
-        rbd: byType.rbd, cephfs: byType.cephfs, noobaa: byType.noobaa,
-      }])
+      setHistory(prev => {
+        const next = [...prev.slice(-600), {
+          ts: now, total,
+          rbd: byType.rbd, cephfs: byType.cephfs, noobaa: byType.noobaa,
+          ceph_r: cephAggRef.current.r,
+          ceph_w: cephAggRef.current.w,
+        }]
+        if (historyRef) historyRef.current = next
+        return next
+      })
 
       // Push throughput sample to active recording
       const sid = recordingIdRef.current
@@ -404,6 +430,7 @@ export default function WorkloadPanel({
         workers,
         engine,
         direct,
+        node_name: nodeName,
         session_id: recordingId,
         kubeconfig_url: kubeconfigUrl,
       })
@@ -488,6 +515,7 @@ export default function WorkloadPanel({
             duration_sec: e.duration_sec,
             obj_size_mb: e.obj_size_mb,
             workers: e.workers,
+            node_name: (e as any).node_name ?? '',
             session_id: null,
             kubeconfig_url: kubeconfigUrl,
           }).then((res: any) => {
@@ -531,7 +559,7 @@ export default function WorkloadPanel({
   function captureCurrentParams() {
     return { workload_type: type, size_gb: size, mode, pattern, block_size: blockSize,
       num_jobs: numJobs, iodepth, duration_sec: duration, obj_size_mb: objSizeMb,
-      workers, engine, direct }
+      workers, engine, direct, node_name: nodeName }
   }
 
   function handleAddToSequence() {
@@ -575,7 +603,7 @@ export default function WorkloadPanel({
       for (const item of [...seqItems].sort((a, b) => a.offset_sec - b.offset_sec)) {
         const delay = item.offset_sec * 1000 - (Date.now() - t0)
         await new Promise(r => setTimeout(r, Math.max(0, delay)))
-        api.post(`/clusters/${clusterName}/workloads`, { ...item, session_id: sessionId, kubeconfig_url: kubeconfigUrl })
+        api.post(`/clusters/${clusterName}/workloads`, { ...item, node_name: item.node_name ?? '', session_id: sessionId, kubeconfig_url: kubeconfigUrl })
           .then(() => refetch())
           .catch((e: any) => console.error(`[sequence] ${item.workload_type} failed:`, e?.message))
       }
@@ -602,8 +630,9 @@ export default function WorkloadPanel({
   }
 
   function seqItemLabel(item: SeqItem) {
-    if (item.workload_type === 'noobaa') return `NooBaa ${item.size_gb}GB ${item.mode}`
-    return `${item.workload_type.toUpperCase()} ${item.size_gb}GB ${item.mode} ${item.pattern}`
+    const nodeTag = item.node_name ? ` [${item.node_name}]` : ''
+    if (item.workload_type === 'noobaa') return `NooBaa ${item.size_gb}GB ${item.mode}${nodeTag}`
+    return `${item.workload_type.toUpperCase()} ${item.size_gb}GB ${item.mode} ${item.pattern}${nodeTag}`
   }
 
   function Btn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
@@ -694,6 +723,34 @@ export default function WorkloadPanel({
             <Btn active={type === 'noobaa'} onClick={() => setType('noobaa')}>NooBaa</Btn>
           </div>
         </div>
+
+        {/* Node pin — only shown when worker nodes are known */}
+        {workerNodes.length > 0 && (
+          <div className="space-y-1">
+            <p className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Node</p>
+            <div className="flex gap-1.5 flex-wrap">
+              <Btn active={nodeName === ''} onClick={() => setNodeName('')}>None</Btn>
+              {workerNodes.map(n => {
+                const dotColor = n.fio && n.noobaa
+                  ? 'bg-accent-green'
+                  : (n.fio || n.noobaa) ? 'bg-yellow-400' : 'bg-accent-red'
+                return (
+                  <button key={n.name}
+                    onClick={() => setNodeName(n.name)}
+                    className={`text-[10px] font-mono px-2 py-0.5 rounded border transition-colors flex items-center gap-1 ${
+                      nodeName === n.name
+                        ? 'border-accent-cyan text-accent-cyan bg-accent-cyan/10'
+                        : 'border-surface-4 text-text-primary hover:border-accent-cyan/40 hover:text-accent-cyan'
+                    }`}
+                  >
+                    <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
+                    {n.name}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Size — PVC / total data */}
         <div className="space-y-1">
@@ -1019,9 +1076,37 @@ export default function WorkloadPanel({
         </div>
       )}
 
-      {/* Active workloads */}
+      {/* Active workloads — throughput chart with R/W toggle */}
       {showList && (
-        <ThroughputChart data={history} />
+        <div className="space-y-1">
+          <div className="flex items-center justify-end gap-1.5">
+            <button
+              onClick={() => setShowRW(false)}
+              className={`text-[9px] font-mono px-2 py-0.5 rounded border transition-colors ${
+                !showRW
+                  ? 'border-accent-cyan/60 text-accent-cyan bg-accent-cyan/10'
+                  : 'border-surface-4 text-text-muted hover:border-accent-cyan/30'
+              }`}
+            >
+              Workloads
+            </button>
+            <button
+              onClick={() => setShowRW(true)}
+              className={`text-[9px] font-mono px-2 py-0.5 rounded border transition-colors ${
+                showRW
+                  ? 'border-accent-cyan/60 text-accent-cyan bg-accent-cyan/10'
+                  : 'border-surface-4 text-text-muted hover:border-accent-cyan/30'
+              }`}
+            >
+              Ceph R/W
+            </button>
+          </div>
+          <ThroughputChart
+            data={history}
+            series={showRW ? RW_SERIES : undefined}
+            areaKey={showRW ? 'ceph_r' : undefined}
+          />
+        </div>
       )}
 
       {showList && activeWorkloads.length > 0 && (() => {

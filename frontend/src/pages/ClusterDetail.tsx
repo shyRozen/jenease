@@ -1,8 +1,9 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
-import { useRef } from 'react'
+import { useRef, useEffect, useState } from 'react'
 import { api } from '../api/client'
 import WorkloadPanel from '../components/WorkloadPanel'
+import ThroughputChart, { OSD_SERIES, type DataPoint } from '../components/ThroughputChart'
 
 // ── types ──────────────────────────────────────────────────────────────────
 
@@ -115,11 +116,41 @@ function fmtBytes(bytes: number): string {
   return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`
 }
 
-function OsdCapacityBar({ capacity }: { capacity: CephCapacity }) {
+function OsdCapacityBar({ capacity, clusterName, kubeconfigUrl }: {
+  capacity: CephCapacity
+  clusterName: string
+  kubeconfigUrl?: string
+}) {
   const { bytes_total, bytes_used, bytes_available } = capacity
+  const [trimming, setTrimming] = useState(false)
+  const [trimMsg, setTrimMsg] = useState('')
   if (!bytes_total) return null
   const usedPct = Math.round((bytes_used / bytes_total) * 100)
   const color = usedPct > 85 ? 'bg-accent-red' : usedPct > 70 ? 'bg-accent-amber' : 'bg-accent-cyan'
+
+  async function handleTrim() {
+    if (!kubeconfigUrl) { setTrimMsg('⚠ Kubeconfig URL not available yet'); return }
+    setTrimming(true)
+    setTrimMsg('')
+    try {
+      const url = `/api/clusters/${clusterName}/fstrim?kubeconfig_url=${encodeURIComponent(kubeconfigUrl)}`
+      const res = await fetch(url, { method: 'POST', credentials: 'include' })
+      const text = await res.text()
+      let data: any = {}
+      try { data = JSON.parse(text) } catch { /* non-JSON */ }
+      if (!res.ok) {
+        setTrimMsg(`⚠ ${data.detail ?? text.slice(0, 80)}`)
+      } else if (data.output?.includes('ERROR')) {
+        setTrimMsg(`⚠ ${data.output.slice(0, 100)}`)
+      } else {
+        setTrimMsg('✓ Trim complete')
+      }
+    } catch (e: any) {
+      setTrimMsg(`⚠ ${e?.message ?? 'Request failed'}`)
+    } finally {
+      setTrimming(false)
+    }
+  }
 
   return (
     <div className="space-y-2">
@@ -133,8 +164,19 @@ function OsdCapacityBar({ capacity }: { capacity: CephCapacity }) {
           style={{ width: `${usedPct}%` }}
         />
       </div>
-      <div className="flex justify-between text-[10px] font-mono">
-        <span className="text-text-secondary">Used <span className="text-text-primary">{fmtBytes(bytes_used)}</span></span>
+      <div className="flex items-center justify-between text-[10px] font-mono">
+        <div className="flex items-center gap-2">
+          <span className="text-text-secondary">Used <span className="text-text-primary">{fmtBytes(bytes_used)}</span></span>
+          <button
+            onClick={handleTrim}
+            disabled={trimming}
+            title="Run fstrim on all worker nodes — releases discarded blocks back to thin-provisioned storage (vSphere/cloud)"
+            className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-surface-4 text-text-muted hover:border-accent-amber/50 hover:text-accent-amber transition-colors disabled:opacity-50"
+          >
+            {trimming ? '⏳' : '⟳ Trim'}
+          </button>
+          {trimMsg && <span className="text-[9px] font-mono text-text-muted">{trimMsg}</span>}
+        </div>
         <span className="text-text-secondary">Free <span className="text-text-primary">{fmtBytes(bytes_available)}</span></span>
         <span className="text-text-secondary">Total <span className="text-text-primary">{fmtBytes(bytes_total)}</span></span>
       </div>
@@ -142,9 +184,10 @@ function OsdCapacityBar({ capacity }: { capacity: CephCapacity }) {
   )
 }
 
-function OsdGrid({ count, up, osdSize, capacity, iops }: {
+function OsdGrid({ count, up, osdSize, capacity, iops, osdStatus }: {
   count: number; up: number; osdSize?: string; capacity?: CephCapacity
   iops?: Record<string, { r?: number; w?: number }>
+  osdStatus?: Record<string, { up?: number; in?: number }>
 }) {
   const perOsdBytes = capacity?.bytes_total ? capacity.bytes_total / count : 0
   const perOsdUsed = capacity?.bytes_used ? capacity.bytes_used / count : 0
@@ -156,16 +199,27 @@ function OsdGrid({ count, up, osdSize, capacity, iops }: {
       <p className="text-[9px] font-mono text-text-muted uppercase tracking-widest mb-2">OSDs</p>
       <div className="flex flex-wrap gap-2">
         {Array.from({ length: count }).map((_, i) => {
-          const isUp   = up <= 0 || i < up
+          // Use per-OSD status from mgr if available, otherwise fall back to count heuristic
+          const status = osdStatus?.[String(i)]
+          const isUp   = status ? status.up === 1 : (up <= 0 || i < up)
+          const isIn   = status ? status.in === 1 : true
           const osdIo  = iops?.[String(i)]
           const rIops  = osdIo?.r ?? null
           const wIops  = osdIo?.w ?? null
           return (
-            <div key={i} className="border border-accent-cyan/20 bg-accent-cyan/5 rounded p-2 w-28 space-y-1.5">
+            <div key={i} className={`border rounded p-2 w-28 space-y-1.5 ${
+              !isUp
+                ? 'border-accent-red/60 bg-accent-red/10 animate-pulse'
+                : !isIn
+                  ? 'border-accent-amber/40 bg-accent-amber/5'
+                  : 'border-accent-cyan/20 bg-accent-cyan/5'
+            }`}>
               {/* OSD label + status dot */}
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-mono text-text-secondary">OSD {i}</span>
-                <span className={`w-1.5 h-1.5 rounded-full ${isUp ? 'bg-accent-green' : 'bg-accent-red'}`} />
+                <span className={`w-1.5 h-1.5 rounded-full ${
+                  !isUp ? 'bg-accent-red' : !isIn ? 'bg-accent-amber' : 'bg-accent-green'
+                } ${!isUp ? 'animate-ping' : ''}`} />
               </div>
               {/* Size */}
               <p className="text-xs font-mono text-text-primary font-semibold">
@@ -276,8 +330,13 @@ export default function ClusterDetail() {
     refetchInterval: 3_000,
   })
 
-  // Dedicated IOPS query — every 5s, independent of full health check
-  const { data: iopsData } = useQuery<{ osd_iops?: Record<string, { r?: number; w?: number }> }>({
+  // Dedicated IOPS + throughput query — every 5s
+  const { data: iopsData } = useQuery<{
+    osd_iops?: Record<string, { r?: number; w?: number }>
+    osd_throughput_mb?: Record<string, { r?: number; w?: number }>
+    pool_throughput_mb?: Record<string, { r?: number; w?: number }>
+    osd_status?: Record<string, { up?: number; in?: number }>
+  }>({
     queryKey: ['iops', name],
     queryFn: () => api.get(`/clusters/${name}/iops`),
     refetchInterval: 5_000,
@@ -285,6 +344,77 @@ export default function ClusterDetail() {
     retry: false,
     enabled: health?.status === 'HEALTHY' || health?.status === 'DEGRADED',
   })
+
+  // Per-OSD throughput history (keyed by OSD id)
+  const osdHistoryRef = useRef<Record<string, DataPoint[]>>({})
+  // Pool-level workload breakdown history (rbd/cephfs/noobaa total r+w per type)
+  const poolHistoryRef = useRef<DataPoint[]>([])
+  // Workload history from WorkloadPanel (populated via historyRef prop)
+  const workloadHistoryRef = useRef<DataPoint[]>([])
+  // Current OSD aggregate totals (for text readout + WorkloadPanel R/W toggle)
+  const [cephAgg, setCephAgg] = useState<{r: number, w: number}>({r: 0, w: 0})
+  const [osdMode, setOsdMode] = useState<'osd' | 'pool'>('osd')
+  const [osdGridWidth, setOsdGridWidth] = useState(0)
+  const osdGridRef = useRef<HTMLDivElement>(null)
+  const [, forceRender] = useState(0)
+
+  // Last known IOPS per OSD — persists when Prometheus query intermittently fails
+  const lastOsdIopsRef = useRef<Record<string, { r: number; w: number }>>({})
+
+  useEffect(() => {
+    if (!iopsData) return
+    const now = Date.now()
+    let totalR = 0, totalW = 0
+
+    // Update last-known IOPS (Prometheus, stable)
+    if (iopsData.osd_iops) {
+      for (const [osd, io] of Object.entries(iopsData.osd_iops as Record<string, { r?: number; w?: number }>)) {
+        lastOsdIopsRef.current[osd] = { r: io.r ?? 0, w: io.w ?? 0 }
+      }
+    }
+
+    // Collect all known OSDs from any available source
+    const knownOsds = new Set<string>([
+      ...Object.keys(iopsData.osd_iops ?? {}),
+      ...Object.keys(iopsData.osd_throughput_mb ?? {}),
+    ])
+
+    // Add a data point for EVERY known OSD on every poll — even 0 values.
+    // This gives consistent 5s-interval points so the 60s chart fills completely.
+    for (const osd of knownOsds) {
+      const mb = (iopsData.osd_throughput_mb as Record<string, { r?: number; w?: number }> | undefined)?.[osd]
+      const r = mb?.r ?? 0, w = mb?.w ?? 0
+      totalR += r; totalW += w
+      const prev = osdHistoryRef.current[osd] ?? []
+      const pt = { ts: now, total: r + w, rbd: 0, cephfs: 0, noobaa: 0, r, w } as unknown as DataPoint
+      osdHistoryRef.current[osd] = [...prev.slice(-720), pt]
+    }
+
+    if (iopsData.pool_throughput_mb) {
+      const pools = iopsData.pool_throughput_mb as Record<string, { r?: number; w?: number }>
+      const rbd    = (pools.rbd?.r   ?? 0) + (pools.rbd?.w   ?? 0)
+      const cephfs = (pools.cephfs?.r ?? 0) + (pools.cephfs?.w ?? 0)
+      const noobaa = (pools.noobaa?.r ?? 0) + (pools.noobaa?.w ?? 0)
+      const total  = rbd + cephfs + noobaa
+      poolHistoryRef.current = [
+        ...poolHistoryRef.current.slice(-720),
+        { ts: now, total, rbd, cephfs, noobaa } as DataPoint,
+      ]
+    }
+
+    setCephAgg({ r: totalR, w: totalW })
+    if (knownOsds.size > 0) forceRender(v => v + 1)
+  }, [iopsData])
+
+  // Single ResizeObserver for the OSD grid — all charts get the same width at once
+  useEffect(() => {
+    const el = osdGridRef.current
+    if (!el) return
+    const ro = new ResizeObserver(([e]) => setOsdGridWidth(e.contentRect.width))
+    ro.observe(el)
+    setOsdGridWidth(el.clientWidth)
+    return () => ro.disconnect()
+  }, [])
 
   const { data: details, isLoading: detailsLoading } = useQuery<DetailsData>({
     queryKey: ['details', name],
@@ -429,11 +559,15 @@ export default function ClusterDetail() {
 
             {/* Capacity bar */}
             {health?.ceph_capacity?.bytes_total ? (
-              <OsdCapacityBar capacity={health.ceph_capacity} />
+              <OsdCapacityBar
+                capacity={health.ceph_capacity}
+                clusterName={name!}
+                kubeconfigUrl={cluster?.kubeconfig_url}
+              />
             ) : null}
 
             <div className="grid gap-8 items-start" style={{ gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr)' }}>
-              {/* Left: OSD tiles + workload list/graph */}
+              {/* Left: OSD tiles + OSD throughput + workload list/graph */}
               <div className="space-y-4">
                 {health?.osd_count ? (
                   <OsdGrid
@@ -441,14 +575,91 @@ export default function ClusterDetail() {
                     up={health.osd_up ?? health.osd_count}
                     osdSize={cluster?.osd_size}
                     capacity={health.ceph_capacity}
-                    iops={iopsData?.osd_iops ?? health.osd_iops}
+                    iops={
+                      iopsData?.osd_iops ??
+                      (Object.keys(lastOsdIopsRef.current).length > 0 ? lastOsdIopsRef.current : health.osd_iops)
+                    }
+                    osdStatus={iopsData?.osd_status}
                   />
                 ) : null}
+
+                {/* OSD throughput section with mode toggle */}
+                {Object.keys(osdHistoryRef.current).length > 0 && (
+                  <div className="space-y-2">
+                    {/* Section header + toggle */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <p className="text-[9px] font-mono text-text-muted uppercase tracking-widest">OSD Throughput</p>
+                        {osdMode === 'osd' && (cephAgg.r > 0 || cephAgg.w > 0) && (
+                          <span className="text-[9px] font-mono text-text-muted">
+                            R <span className="text-[#00d4ff]">{cephAgg.r.toFixed(1)}</span>
+                            {' '}W <span className="text-[#50fa7b]">{cephAgg.w.toFixed(1)}</span>
+                            {' '}MB/s total
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex gap-1">
+                        <button onClick={() => setOsdMode('osd')}
+                          className={`text-[9px] font-mono px-2 py-0.5 rounded border transition-colors ${
+                            osdMode === 'osd'
+                              ? 'border-accent-cyan/60 text-accent-cyan bg-accent-cyan/10'
+                              : 'border-surface-4 text-text-muted hover:border-accent-cyan/30'
+                          }`}>
+                          Per OSD
+                        </button>
+                        <button onClick={() => setOsdMode('pool')}
+                          className={`text-[9px] font-mono px-2 py-0.5 rounded border transition-colors ${
+                            osdMode === 'pool'
+                              ? 'border-accent-cyan/60 text-accent-cyan bg-accent-cyan/10'
+                              : 'border-surface-4 text-text-muted hover:border-accent-cyan/30'
+                          }`}>
+                          By Pool
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Per OSD mode: per-OSD R/W charts, 3 per row, all same width */}
+                    {osdMode === 'osd' && (() => {
+                      const GAP = 8, COLS = 3
+                      const cw = osdGridWidth > 0
+                        ? Math.floor((osdGridWidth - GAP * (COLS - 1)) / COLS)
+                        : undefined
+                      return (
+                        <div ref={osdGridRef} className="grid grid-cols-3 gap-2">
+                          {Object.entries(osdHistoryRef.current)
+                            .sort(([a], [b]) => Number(a) - Number(b))
+                            .map(([osd, hist]) => (
+                              <ThroughputChart
+                                key={osd}
+                                data={hist}
+                                series={OSD_SERIES}
+                                areaKey="total"
+                                title={`OSD ${osd}`}
+                                height={140}
+                                containerWidth={cw}
+                                visibleSecs={60}
+                              />
+                            ))}
+                        </div>
+                      )
+                    })()}
+
+                    {/* By Pool mode: RBD / CephFS / NooBaa from Prometheus pool metrics */}
+                    {osdMode === 'pool' && (
+                      <ThroughputChart
+                        data={poolHistoryRef.current}
+                        title="Pool Throughput"
+                      />
+                    )}
+                  </div>
+                )}
+
                 <WorkloadPanel
                   clusterName={name!}
                   kubeconfigUrl={cluster?.kubeconfig_url}
                   showLauncher={false}
                   sharedRatesRef={isOwner ? sharedRatesRef : undefined}
+                  cephAgg={cephAgg}
                 />
               </div>
               {/* Right: launcher + recording (owner only) — shares ratesRef with list panel */}
@@ -459,6 +670,7 @@ export default function ClusterDetail() {
                     kubeconfigUrl={cluster?.kubeconfig_url}
                     showList={false}
                     sharedRatesRef={sharedRatesRef}
+                    cephAgg={cephAgg}
                   />
                 </div>
               )}

@@ -22,6 +22,12 @@ _TOKEN_TTL = 3300  # 55 minutes
 # Two separate caches so health-check scrapes and iops-poll scrapes don't interfere
 _CEPH_PREV_SAMPLE: dict[str, dict] = {}         # keyed by "{host}:throughput"
 
+# Holdlast cache: when a counter hasn't changed since the last sample (Ceph updates
+# its perf counters every ~5s), return the last computed non-zero rate instead of 0.
+# Held for up to HOLDLAST_TTL seconds, then drops to 0 if truly idle.
+_CEPH_HOLDLAST: dict[str, dict] = {}   # key → {label_tuple: {'rate': float, 'ts': float}}
+_HOLDLAST_TTL = 10.0                   # 10s ≈ 2× typical Ceph counter refresh interval
+
 # Cached k8s ApiClient instances to avoid recreating on every 5s poll
 # key: api_server_host → (api_client, cfg, expires_monotonic)
 _K8S_CLIENT_CACHE: dict[str, tuple] = {}
@@ -301,13 +307,27 @@ def _fetch_ceph_metrics_direct(api_client, cfg, cache_suffix: str = 'iops') -> d
     # (counter reset, first-sample artifact, or corrupt reading).
     _MAX_MB_S = 5000.0
 
+    hl_store = _CEPH_HOLDLAST.setdefault(cache_key, {})
+
     def delta_rate(metric: str) -> list:
+        """Compute per-label rate (counter delta / dt).
+        When a counter is unchanged (Ceph updates perf counters every ~5s),
+        return the last non-zero rate from holdlast cache (up to HOLDLAST_TTL).
+        This prevents zero-spike artifacts in 1s SSE streams."""
         idx = {tuple(sorted(pl.items())): pv for pl, pv in prev_data.get(metric, [])}
         out = []
         for labels, cv in all_cur.get(metric, []):
-            pv = idx.get(tuple(sorted(labels.items())))
+            key = tuple(sorted(labels.items()))
+            pv  = idx.get(key)
             if pv is not None:
-                rate = max(0.0, cv - pv) / dt
+                delta = cv - pv
+                if delta > 0:
+                    rate = delta / dt
+                    hl_store[f"{metric}:{key}"] = {'rate': rate, 'ts': now_ts}
+                else:
+                    # Counter unchanged — use holdlast if within TTL, else 0
+                    hl = hl_store.get(f"{metric}:{key}")
+                    rate = (hl['rate'] if hl and (now_ts - hl['ts']) < _HOLDLAST_TTL else 0.0)
                 out.append((labels, rate))
         return out
 

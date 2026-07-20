@@ -6,11 +6,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json', ...init?.headers },
     ...init,
   })
-  // 401 from Jenkins (wrong token/instance) on a real API call → force re-login
-  // Exclude /auth/* and /clusters/active so normal "not logged in" state doesn't loop
-  const isAuthEndpoint = path.startsWith('/auth/')
-  const isPassiveCheck = path === '/clusters/active' || path === '/agents'
-  if (res.status === 401 && !isAuthEndpoint && !isPassiveCheck) {
+  // Only auto-logout on 401 from /auth/me — that means the session cookie is invalid.
+  // 401s from Jenkins API calls (clusters, deploy, etc.) mean the Jenkins token is bad
+  // but the session itself is still valid — show an error, don't kick the user out.
+  if (res.status === 401 && path === '/auth/me') {
     await fetch(`${BASE}/auth/logout`, { method: 'POST', credentials: 'include' })
     window.location.href = '/'
     throw new Error('Session expired — please log in again')

@@ -58,14 +58,21 @@ class JenkinsClient:
             return r.json()
 
     async def get_job_builds(self, job: str, limit: int = 50) -> list[dict]:
+        url    = f"{self.base}/job/{job}/api/json"
+        params = {"tree": f"builds[number,result,building,timestamp,description,duration]{{0,{limit}}}"}
         async with self._client() as c:
-            r = await c.get(
-                f"{self.base}/job/{job}/api/json",
-                params={"tree": f"builds[number,result,building,timestamp,description,duration]{{0,{limit}}}"},
-            )
-            self._check_auth(r)
-            r.raise_for_status()
+            r = await c.get(url, params=params)
+        if r.status_code == 200:
             return r.json().get("builds", [])
+        # SSO-only Jenkins rejects Basic Auth but allows anonymous reads (same as validate())
+        if r.status_code in (401, 403):
+            async with httpx.AsyncClient(**_CLIENT_DEFAULTS) as anon:
+                r2 = await anon.get(url, params=params)
+            if r2.status_code == 200:
+                return r2.json().get("builds", [])
+        self._check_auth(r)
+        r.raise_for_status()
+        return []
 
     async def get_build_params(self, job: str, build_num: int) -> dict:
         build = await self.get_build(job, build_num)

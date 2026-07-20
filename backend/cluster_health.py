@@ -874,6 +874,192 @@ def _fetch_iops_via_kubeconfig_sync(kubeconfig_text: str) -> dict:
     return result
 
 
+def osd_perf_stream_thread(kube_text: str, put_fn, stop_event) -> None:
+    """Persistent exec into rook-ceph-tools pod.
+    Runs a shell loop that reads every OSD's admin socket + pool stats every 1s.
+    Admin socket reads are sub-millisecond Unix IPC — true real-time counter data.
+    Calls put_fn(result_dict) on each TICK, put_fn(None) when done."""
+    import json as _json, threading as _threading
+    from kubernetes import client as _k8s
+    from kubernetes.stream import stream as _k8s_stream
+
+    api_client, cfg = _get_cached_k8s_client(kube_text)
+    core = _k8s.CoreV1Api(api_client)
+
+    # Find toolbox pod
+    try:
+        pods = core.list_namespaced_pod('openshift-storage', label_selector='app=rook-ceph-tools')
+        if not pods.items:
+            put_fn(None); return
+        toolbox_pod = pods.items[0].metadata.name
+    except Exception:
+        put_fn(None); return
+
+    # Script: loop every 1s, read perf counters from each OSD via Ceph cluster network.
+    # "ceph tell osd.X perf dump" routes through Mon→OSD (not local admin socket),
+    # so it works from the toolbox pod without needing per-node socket access.
+    # Background jobs + temp files make all OSD tells run in PARALLEL — total time
+    # equals the slowest single OSD (~50-100ms) instead of N * latency.
+    script = r'''
+while true; do
+  tmpd=$(mktemp -d)
+  for osd in $(ceph osd ls 2>/dev/null); do
+    ( printf "OSD_START %s\n" "$osd"
+      ceph tell osd.$osd perf dump -f json 2>/dev/null
+      printf "OSD_END\n" ) > "$tmpd/$osd.txt" &
+  done
+  wait
+  cat "$tmpd"/*.txt 2>/dev/null
+  rm -rf "$tmpd"
+  printf "POOLS_START\n"
+  ceph osd pool stats -f json 2>/dev/null
+  printf "POOLS_END\n"
+  printf "STATUS_START\n"
+  ceph osd tree -f json 2>/dev/null
+  printf "STATUS_END\n"
+  printf "TICK\n"
+  sleep 1
+done
+'''
+    try:
+        ws = _k8s_stream(
+            core.connect_get_namespaced_pod_exec,
+            toolbox_pod, 'openshift-storage',
+            command=['bash', '-c', script],
+            stderr=False, stdin=False, stdout=True, tty=False,
+            _preload_content=False,
+        )
+    except Exception:
+        put_fn(None); return
+
+    buf              = ''
+    current_section  = None
+    current_osd      = None
+    lines_buf: list  = []
+    osd_bytes_curr: dict = {}
+    pool_stats_curr: list = []
+    osd_tree_curr: dict  = {}
+    prev_osd_bytes: dict = {}
+    prev_ts = time.monotonic()
+
+    try:
+        while ws.is_open() and not stop_event.is_set():
+            ws.update(timeout=2)
+            if not ws.peek_stdout():
+                continue
+            chunk = ws.read_stdout()
+            buf += chunk
+            parts = buf.split('\n')
+            buf = parts[-1]
+
+            for line in parts[:-1]:
+                line = line.rstrip('\r')
+                if not line:
+                    continue
+
+                if line.startswith('OSD_START '):
+                    current_osd = line.split(' ', 1)[1]
+                    current_section = 'osd'
+                    lines_buf = []
+                elif line == 'OSD_END':
+                    if current_osd and lines_buf:
+                        try:
+                            d = _json.loads('\n'.join(lines_buf))
+                            s = d.get('osd', {})
+                            rl = s.get('op_r_latency') or {}
+                            wl = s.get('op_w_latency') or {}
+                            osd_bytes_curr[current_osd] = {
+                                'r': int(s.get('op_r_out_bytes', 0) or 0),
+                                'w': int(s.get('op_w_in_bytes', 0) or 0),
+                                'r_ops': int((rl.get('avgcount') or 0)),
+                                'w_ops': int((wl.get('avgcount') or 0)),
+                            }
+                        except Exception:
+                            pass
+                    current_osd = None; lines_buf = []
+                elif line == 'POOLS_START':
+                    current_section = 'pools'; lines_buf = []
+                elif line == 'POOLS_END':
+                    if lines_buf:
+                        try: pool_stats_curr = _json.loads('\n'.join(lines_buf))
+                        except Exception: pass
+                    lines_buf = []
+                elif line == 'STATUS_START':
+                    current_section = 'status'; lines_buf = []
+                elif line == 'STATUS_END':
+                    if lines_buf:
+                        try: osd_tree_curr = _json.loads('\n'.join(lines_buf))
+                        except Exception: pass
+                    lines_buf = []
+                elif line == 'TICK':
+                    now_ts = time.monotonic()
+                    dt     = now_ts - prev_ts
+                    result: dict = {}
+
+                    # Per-OSD IOPS + throughput (delta from admin socket counters)
+                    if dt > 0.1 and prev_osd_bytes:
+                        osd_iops: dict = {}
+                        osd_thr:  dict = {}
+                        for oid, curr in osd_bytes_curr.items():
+                            prev = prev_osd_bytes.get(oid)
+                            if prev is None:
+                                continue
+                            dr     = max(0, curr['r']     - prev['r'])
+                            dw     = max(0, curr['w']     - prev['w'])
+                            dr_ops = max(0, curr['r_ops'] - prev['r_ops'])
+                            dw_ops = max(0, curr['w_ops'] - prev['w_ops'])
+                            osd_thr[oid]  = {
+                                'r': round(min(dr / dt / 1_048_576, 5000.0), 3),
+                                'w': round(min(dw / dt / 1_048_576, 5000.0), 3),
+                            }
+                            osd_iops[oid] = {
+                                'r': int(dr_ops / dt),
+                                'w': int(dw_ops / dt),
+                            }
+                        if osd_iops:   result['osd_iops']          = osd_iops
+                        if osd_thr:    result['osd_throughput_mb'] = osd_thr
+
+                    # Pool throughput — already a rate from Ceph monitor, no delta needed
+                    pool_thr: dict = {}
+                    for ps in pool_stats_curr:
+                        wtype = _pool_to_workload(ps.get('pool_name', ''))
+                        if wtype:
+                            cio = ps.get('client_io_rate', {})
+                            pool_thr.setdefault(wtype, {'r': 0.0, 'w': 0.0})
+                            pool_thr[wtype]['r'] = round(
+                                pool_thr[wtype]['r'] + cio.get('read_bytes_sec', 0) / 1_048_576, 3)
+                            pool_thr[wtype]['w'] = round(
+                                pool_thr[wtype]['w'] + cio.get('write_bytes_sec', 0) / 1_048_576, 3)
+                    if pool_thr: result['pool_throughput_mb'] = pool_thr
+
+                    # OSD up/in status from osd tree
+                    osd_status: dict = {}
+                    for node in osd_tree_curr.get('nodes', []):
+                        if node.get('type') == 'osd':
+                            oid = str(node['id'])
+                            osd_status[oid] = {
+                                'up': 1 if node.get('status') == 'up' else 0,
+                                'in': 1 if (node.get('reweight') or 0) > 0 else 0,
+                            }
+                    if osd_status: result['osd_status'] = osd_status
+
+                    if result:
+                        put_fn(result)
+
+                    prev_osd_bytes = {k: dict(v) for k, v in osd_bytes_curr.items()}
+                    prev_ts = now_ts
+                    osd_bytes_curr = {}
+                    pool_stats_curr = []
+                elif current_section:
+                    lines_buf.append(line)
+    except Exception:
+        pass
+    finally:
+        try: ws.close()
+        except Exception: pass
+        put_fn(None)
+
+
 async def fetch_cluster_iops(
     kubeconfig_url: Optional[str] = None,
     console_url: Optional[str] = None,

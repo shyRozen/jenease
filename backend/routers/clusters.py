@@ -770,15 +770,16 @@ async def cluster_iops_stream(
     request: Request,
     session: dict = Depends(get_session),
 ):
-    """SSE stream of OSD IOPS + throughput, pushed every ~1s directly from Ceph.
-    Uses parallel scraping so each cycle completes in ~300-500ms."""
+    """SSE stream: persistent exec into rook-ceph-tools, reads OSD admin sockets every 1s.
+    Admin socket IPC is sub-millisecond — true real-time counter data, no exporter lag."""
     from sse_starlette.sse import EventSourceResponse
-    import json as _json
-    from cluster_health import _fetch_iops_via_kubeconfig_sync
+    import json as _json, threading as _threading
+    from cluster_health import osd_perf_stream_thread
 
     async def generate():
         loop = asyncio.get_event_loop()
-        # Download kubeconfig text once; _get_cached_k8s_client caches the client
+
+        # Download kubeconfig once
         try:
             async with httpx.AsyncClient(timeout=10.0, verify=False) as c:
                 r = await c.get(kubeconfig_url)
@@ -788,19 +789,32 @@ async def cluster_iops_stream(
         except Exception:
             return
 
-        while True:
-            if await request.is_disconnected():
-                break
-            try:
-                result = await asyncio.wait_for(
-                    loop.run_in_executor(None, _fetch_iops_via_kubeconfig_sync, kube_text),
-                    timeout=8.0,
-                )
-                if result:
-                    yield {"data": _json.dumps(result)}
-            except Exception:
-                pass
-            await asyncio.sleep(1)
+        result_queue: asyncio.Queue = asyncio.Queue()
+        stop_event = _threading.Event()
+
+        def put_result(data):
+            loop.call_soon_threadsafe(result_queue.put_nowait, data)
+
+        thread = _threading.Thread(
+            target=osd_perf_stream_thread,
+            args=(kube_text, put_result, stop_event),
+            daemon=True,
+        )
+        thread.start()
+
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    item = await asyncio.wait_for(result_queue.get(), timeout=5.0)
+                    if item is None:
+                        break
+                    yield {"data": _json.dumps(item)}
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            stop_event.set()
 
     return EventSourceResponse(generate(), headers={"Content-Encoding": "identity"})
 

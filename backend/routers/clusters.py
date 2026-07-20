@@ -766,12 +766,11 @@ async def cluster_iops_endpoint(cluster_name: str, session: dict = Depends(get_s
 @router.get("/{cluster_name}/iops/stream")
 async def cluster_iops_stream(
     cluster_name: str,
-    kubeconfig_url: str,
     request: Request,
     session: dict = Depends(get_session),
 ):
-    """SSE stream: persistent exec into rook-ceph-tools, reads OSD admin sockets every 1s.
-    Admin socket IPC is sub-millisecond — true real-time counter data, no exporter lag."""
+    """SSE stream: persistent exec into rook-ceph-tools, reads OSD perf counters every 1s.
+    Finds the cluster kubeconfig from Jenkins builds (no frontend param needed)."""
     from sse_starlette.sse import EventSourceResponse
     import json as _json, threading as _threading
     from cluster_health import osd_perf_stream_thread
@@ -779,7 +778,22 @@ async def cluster_iops_stream(
     async def generate():
         loop = asyncio.get_event_loop()
 
-        # Download kubeconfig once
+        # Find kubeconfig_url from Jenkins builds (same as /iops endpoint)
+        kubeconfig_url: Optional[str] = None
+        try:
+            jenkins = _make_client(session)
+            builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+            for b in builds:
+                if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+                    parsed = JenkinsClient.parse_build_description(b.get("description", "") or "")
+                    kubeconfig_url = parsed.get("kubeconfig_url")
+                    break
+        except Exception:
+            pass
+        if not kubeconfig_url:
+            return
+
+        # Download kubeconfig text once
         try:
             async with httpx.AsyncClient(timeout=10.0, verify=False) as c:
                 r = await c.get(kubeconfig_url)

@@ -905,7 +905,7 @@ while true; do
   tmpd=$(mktemp -d)
   for osd in $(ceph osd ls 2>/dev/null); do
     ( printf "OSD_START %s\n" "$osd"
-      ceph tell osd.$osd perf dump -f json 2>/dev/null
+      ceph tell osd.$osd perf dump 2>/dev/null
       printf "OSD_END\n" ) > "$tmpd/$osd.txt" &
   done
   wait

@@ -380,7 +380,6 @@ export default function ClusterDetail() {
   const [iopsData, setIopsData] = useState<IopsData | null>(null)
   // kubeconfig_url is extracted from clusterList (declared below) — store in state
   // so the SSE effect can depend on it cleanly
-  const [kubeconfigUrlForIops, setKubeconfigUrlForIops] = useState<string | null>(null)
   const isClusterActive = health?.status === 'HEALTHY' || health?.status === 'DEGRADED'
 
   // Per-OSD throughput history (keyed by OSD id)
@@ -398,21 +397,6 @@ export default function ClusterDetail() {
 
   // Last known IOPS per OSD — persists when query intermittently misses
   const lastOsdIopsRef = useRef<Record<string, { r: number; w: number }>>({})
-
-  // Seed osdHistoryRef from health.osd_iops as a fallback when SSE has no data.
-  // This makes the OSD section visible even when kubeconfig_url is unavailable.
-  useEffect(() => {
-    const healthIops = health?.osd_iops as Record<string, { r?: number; w?: number }> | undefined
-    if (!healthIops || Object.keys(osdHistoryRef.current).length > 0) return
-    const now = Date.now()
-    for (const [osd, io] of Object.entries(healthIops)) {
-      lastOsdIopsRef.current[osd] = { r: io.r ?? 0, w: io.w ?? 0 }
-      osdHistoryRef.current[osd] = [
-        { ts: now, total: 0, rbd: 0, cephfs: 0, noobaa: 0, r: 0, w: 0 } as unknown as DataPoint
-      ]
-    }
-    if (Object.keys(healthIops).length > 0) forceRender(v => v + 1)
-  }, [health?.osd_iops])
 
   useEffect(() => {
     if (!iopsData) return
@@ -479,36 +463,16 @@ export default function ClusterDetail() {
   })
   const cluster = clusterList.find((c: any) => c.cluster_name === name)
 
-  // Sync kubeconfigUrl into state when cluster loads so SSE effect can use it
+  // SSE stream — backend finds kubeconfig via Jenkins, no frontend param needed
   useEffect(() => {
-    if (cluster?.kubeconfig_url) setKubeconfigUrlForIops(cluster.kubeconfig_url)
-  }, [cluster?.kubeconfig_url])
-
-  // Open SSE stream when we have a kubeconfig URL — real 1s data from Ceph admin sockets
-  useEffect(() => {
-    if (!isClusterActive || !kubeconfigUrlForIops) return
-    const url = `/api/clusters/${name}/iops/stream?kubeconfig_url=${encodeURIComponent(kubeconfigUrlForIops)}`
-    const es = new EventSource(url, { withCredentials: true })
+    if (!isClusterActive) return
+    const es = new EventSource(`/api/clusters/${name}/iops/stream`, { withCredentials: true })
     es.onmessage = (e) => {
       try { setIopsData(JSON.parse(e.data)) } catch {}
     }
-    es.onerror = () => {} // EventSource auto-reconnects
+    es.onerror = () => {}
     return () => es.close()
-  }, [name, kubeconfigUrlForIops, isClusterActive])
-
-  // Fallback: poll /iops every 5s when kubeconfig_url is unavailable (e.g. building clusters)
-  useEffect(() => {
-    if (!isClusterActive || kubeconfigUrlForIops) return
-    const poll = async () => {
-      try {
-        const data = await api.get(`/clusters/${name}/iops`)
-        if (data) setIopsData(data as IopsData)
-      } catch {}
-    }
-    poll()
-    const id = setInterval(poll, 5_000)
-    return () => clearInterval(id)
-  }, [name, kubeconfigUrlForIops, isClusterActive])
+  }, [name, isClusterActive])
 
   const podGroups = groupPods(details?.pods ?? [])
   const masters = health?.nodes?.filter(n => n.role === 'master') ?? []

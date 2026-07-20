@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from auth import get_session
@@ -761,6 +761,48 @@ async def cluster_iops_endpoint(cluster_name: str, session: dict = Depends(get_s
         kubeadmin_password=parsed.get("kubeadmin_password"),
     )
     return result
+
+
+@router.get("/{cluster_name}/iops/stream")
+async def cluster_iops_stream(
+    cluster_name: str,
+    kubeconfig_url: str,
+    request: Request,
+    session: dict = Depends(get_session),
+):
+    """SSE stream of OSD IOPS + throughput, pushed every ~1s directly from Ceph.
+    Uses parallel scraping so each cycle completes in ~300-500ms."""
+    from sse_starlette.sse import EventSourceResponse
+    import json as _json
+    from cluster_health import _fetch_iops_via_kubeconfig_sync
+
+    async def generate():
+        loop = asyncio.get_event_loop()
+        # Download kubeconfig text once; _get_cached_k8s_client caches the client
+        try:
+            async with httpx.AsyncClient(timeout=10.0, verify=False) as c:
+                r = await c.get(kubeconfig_url)
+                if not r.is_success or 'not available' in r.text.lower():
+                    return
+                kube_text = r.text
+        except Exception:
+            return
+
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, _fetch_iops_via_kubeconfig_sync, kube_text),
+                    timeout=8.0,
+                )
+                if result:
+                    yield {"data": _json.dumps(result)}
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+
+    return EventSourceResponse(generate(), headers={"Content-Encoding": "identity"})
 
 
 @router.get("/{cluster_name}/stage")

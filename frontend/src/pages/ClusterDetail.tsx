@@ -370,20 +370,18 @@ export default function ClusterDetail() {
     refetchInterval: 3_000,
   })
 
-  // Dedicated IOPS + throughput query — every 5s
-  const { data: iopsData } = useQuery<{
+  // OSD IOPS + throughput — SSE stream from Ceph (real 1s data via parallel scraping)
+  type IopsData = {
     osd_iops?: Record<string, { r?: number; w?: number }>
     osd_throughput_mb?: Record<string, { r?: number; w?: number }>
     pool_throughput_mb?: Record<string, { r?: number; w?: number }>
     osd_status?: Record<string, { up?: number; in?: number }>
-  }>({
-    queryKey: ['iops', name],
-    queryFn: () => api.get(`/clusters/${name}/iops`),
-    refetchInterval: 5_000,
-    staleTime: 4_000,
-    retry: false,
-    enabled: health?.status === 'HEALTHY' || health?.status === 'DEGRADED',
-  })
+  }
+  const [iopsData, setIopsData] = useState<IopsData | null>(null)
+  // kubeconfig_url is extracted from clusterList (declared below) — store in state
+  // so the SSE effect can depend on it cleanly
+  const [kubeconfigUrlForIops, setKubeconfigUrlForIops] = useState<string | null>(null)
+  const isClusterActive = health?.status === 'HEALTHY' || health?.status === 'DEGRADED'
 
   // Per-OSD throughput history (keyed by OSD id)
   const osdHistoryRef = useRef<Record<string, DataPoint[]>>({})
@@ -398,7 +396,7 @@ export default function ClusterDetail() {
   const osdGridRef = useRef<HTMLDivElement>(null)
   const [, forceRender] = useState(0)
 
-  // Last known IOPS per OSD — persists when Prometheus query intermittently fails
+  // Last known IOPS per OSD — persists when query intermittently misses
   const lastOsdIopsRef = useRef<Record<string, { r: number; w: number }>>({})
 
   useEffect(() => {
@@ -406,21 +404,17 @@ export default function ClusterDetail() {
     const now = Date.now()
     let totalR = 0, totalW = 0
 
-    // Update last-known IOPS (Prometheus, stable)
     if (iopsData.osd_iops) {
       for (const [osd, io] of Object.entries(iopsData.osd_iops as Record<string, { r?: number; w?: number }>)) {
         lastOsdIopsRef.current[osd] = { r: io.r ?? 0, w: io.w ?? 0 }
       }
     }
 
-    // Collect all known OSDs from any available source
     const knownOsds = new Set<string>([
       ...Object.keys(iopsData.osd_iops ?? {}),
       ...Object.keys(iopsData.osd_throughput_mb ?? {}),
     ])
 
-    // Add a data point for EVERY known OSD on every poll — even 0 values.
-    // This gives consistent 5s-interval points so the 60s chart fills completely.
     for (const osd of knownOsds) {
       const mb = (iopsData.osd_throughput_mb as Record<string, { r?: number; w?: number }> | undefined)?.[osd]
       const r = mb?.r ?? 0, w = mb?.w ?? 0
@@ -435,10 +429,9 @@ export default function ClusterDetail() {
       const rbd    = (pools.rbd?.r   ?? 0) + (pools.rbd?.w   ?? 0)
       const cephfs = (pools.cephfs?.r ?? 0) + (pools.cephfs?.w ?? 0)
       const noobaa = (pools.noobaa?.r ?? 0) + (pools.noobaa?.w ?? 0)
-      const total  = rbd + cephfs + noobaa
       poolHistoryRef.current = [
         ...poolHistoryRef.current.slice(-720),
-        { ts: now, total, rbd, cephfs, noobaa } as DataPoint,
+        { ts: now, total: rbd + cephfs + noobaa, rbd, cephfs, noobaa } as DataPoint,
       ]
     }
 
@@ -470,6 +463,23 @@ export default function ClusterDetail() {
     staleTime: 30_000,
   })
   const cluster = clusterList.find((c: any) => c.cluster_name === name)
+
+  // Sync kubeconfigUrl into state when cluster loads so SSE effect can use it
+  useEffect(() => {
+    if (cluster?.kubeconfig_url) setKubeconfigUrlForIops(cluster.kubeconfig_url)
+  }, [cluster?.kubeconfig_url])
+
+  // Open SSE stream once we have both the kubeconfig URL and an active cluster
+  useEffect(() => {
+    if (!isClusterActive || !kubeconfigUrlForIops) return
+    const url = `/api/clusters/${name}/iops/stream?kubeconfig_url=${encodeURIComponent(kubeconfigUrlForIops)}`
+    const es = new EventSource(url, { withCredentials: true })
+    es.onmessage = (e) => {
+      try { setIopsData(JSON.parse(e.data)) } catch {}
+    }
+    es.onerror = () => {} // EventSource auto-reconnects
+    return () => es.close()
+  }, [name, kubeconfigUrlForIops, isClusterActive])
 
   const podGroups = groupPods(details?.pods ?? [])
   const masters = health?.nodes?.filter(n => n.role === 'master') ?? []

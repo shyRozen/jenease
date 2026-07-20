@@ -230,7 +230,7 @@ export default function WorkloadPanel({
   sharedRatesRef,
   cephAgg,
   historyRef,
-  poolHistory,
+  poolBreakdown,
 }: {
   clusterName: string
   kubeconfigUrl?: string
@@ -238,7 +238,7 @@ export default function WorkloadPanel({
   showList?: boolean
   sharedRatesRef?: React.MutableRefObject<Record<number, number>>
   cephAgg?: { r: number; w: number }
-  poolHistory?: DataPoint[]
+  poolBreakdown?: { rbd: number; cephfs: number; noobaa: number }
   historyRef?: React.MutableRefObject<DataPoint[]>
 }) {
   const queryClient = useQueryClient()
@@ -306,6 +306,8 @@ export default function WorkloadPanel({
 
   const cephAggRef = useRef<{r: number; w: number}>({r: 0, w: 0})
   cephAggRef.current = cephAgg ?? {r: 0, w: 0}
+  const poolBreakdownRef = useRef<{rbd: number; cephfs: number; noobaa: number}>({rbd: 0, cephfs: 0, noobaa: 0})
+  poolBreakdownRef.current = poolBreakdown ?? {rbd: 0, cephfs: 0, noobaa: 0}
   const [showRW, setShowRW] = useState(false)
 
   const [purging, setPurging] = useState(false)
@@ -358,12 +360,19 @@ export default function WorkloadPanel({
         const r = ratesRef.current[w.id] ?? 0
         byType[w.workload_type] = (byType[w.workload_type] ?? 0) + r
       }
-      const total = Object.values(byType).reduce((a, b) => a + b, 0)
+      const fioTotal = Object.values(byType).reduce((a, b) => a + b, 0)
+      // When no fio workloads active, fill in pool breakdown from Ceph metrics
+      // so the chart shows RBD/CephFS/NooBaa lines for all users at 1s resolution.
+      const pool = poolBreakdownRef.current
+      const rbd    = fioTotal > 0 ? byType.rbd    : pool.rbd
+      const cephfs = fioTotal > 0 ? byType.cephfs : pool.cephfs
+      const noobaa = fioTotal > 0 ? byType.noobaa : pool.noobaa
+      const total  = fioTotal > 0 ? fioTotal : rbd + cephfs + noobaa
       const now = Date.now()
       setHistory(prev => {
         const next = [...prev.slice(-600), {
           ts: now, total,
-          rbd: byType.rbd, cephfs: byType.cephfs, noobaa: byType.noobaa,
+          rbd, cephfs, noobaa,
           ceph_r: cephAggRef.current.r,
           ceph_w: cephAggRef.current.w,
         }]
@@ -1104,12 +1113,7 @@ export default function WorkloadPanel({
             </button>
           </div>
           <ThroughputChart
-            data={showRW
-              ? history                                              // Ceph R/W: always fio history (has ceph_r/ceph_w)
-              : (history.some(d => d.total > 0)
-                  ? history                                         // Workloads: own fio data when available
-                  : (poolHistory ?? history))                       // Workloads: fall back to pool data (RBD/CephFS/NooBaa)
-            }
+            data={history}
             series={showRW ? RW_SERIES : undefined}
             areaKey={showRW ? 'ceph_r' : undefined}
           />

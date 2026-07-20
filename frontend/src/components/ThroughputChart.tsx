@@ -135,7 +135,12 @@ export default function ThroughputChart({
     ? `M${tsToX(visible[0].ts).toFixed(1)},${(PAD.top + H).toFixed(1)}L${fillPts.join('L')}L${tsToX(visible[visible.length - 1].ts).toFixed(1)},${(PAD.top + H).toFixed(1)}Z`
     : ''
 
-  const yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => ({ y: valToY(maxVal * f), label: `${(maxVal * f).toFixed(0)}` }))
+  // Build Y-axis ticks and deduplicate labels that round to the same string
+  const yTicks = (() => {
+    const raw = [0, 0.25, 0.5, 0.75, 1].map(f => ({ y: valToY(maxVal * f), label: fmtMb(maxVal * f) }))
+    const seen = new Set<string>()
+    return raw.filter(t => { if (seen.has(t.label)) return false; seen.add(t.label); return true })
+  })()
 
   const xTicks: { x: number; label: string }[] = []
   const tickInterval = 10

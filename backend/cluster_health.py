@@ -297,6 +297,7 @@ def _fetch_ceph_metrics_direct(api_client, cfg, cache_suffix: str = 'iops') -> d
     def mb_s(rate_bytes: float) -> float:
         return round(min(rate_bytes / 1_048_576, _MAX_MB_S), 3)
 
+    osd_iops:           dict = {}
     osd_throughput_mb:  dict = {}
     pool_throughput_mb: dict = {}
     osd_status:         dict = {}
@@ -310,6 +311,17 @@ def _fetch_ceph_metrics_direct(api_client, cfg, cache_suffix: str = 'iops') -> d
         d = labels.get('ceph_daemon', '')
         if d.startswith('osd.'):
             osd_status.setdefault(int(d.split('.')[1]), {})['in'] = int(val)
+
+    # Per-OSD IOPS from latency_count delta (ceph-exporter, 2-5s refresh)
+    # This replaces the Prometheus rate[30s] path — same source as throughput, no lag.
+    for labels, rate in delta_rate('ceph_osd_op_r_latency_count'):
+        d = labels.get('ceph_daemon', '')
+        if d.startswith('osd.'):
+            osd_iops.setdefault(int(d.split('.')[1]), {})['r'] = int(rate)
+    for labels, rate in delta_rate('ceph_osd_op_w_latency_count'):
+        d = labels.get('ceph_daemon', '')
+        if d.startswith('osd.'):
+            osd_iops.setdefault(int(d.split('.')[1]), {})['w'] = int(rate)
 
     # Per-OSD bytes → MB/s capped at 5 GB/s (from ceph-exporter)
     for labels, rate in delta_rate('ceph_osd_op_r_out_bytes'):
@@ -334,6 +346,7 @@ def _fetch_ceph_metrics_direct(api_client, cfg, cache_suffix: str = 'iops') -> d
             pool_throughput_mb[wt]['w'] = round(min(pool_throughput_mb[wt]['w'] + mb_s(rate), _MAX_MB_S), 3)
 
     result: dict = {}
+    if osd_iops:           result['osd_iops']           = osd_iops
     if osd_throughput_mb:  result['osd_throughput_mb']  = osd_throughput_mb
     if pool_throughput_mb: result['pool_throughput_mb'] = pool_throughput_mb
     if osd_status:         result['osd_status']         = osd_status
@@ -807,15 +820,19 @@ def _query_osd_iops_via_prom_proxy(api_client, cfg) -> dict:
 
 
 def _fetch_iops_via_kubeconfig_sync(kubeconfig_text: str) -> dict:
-    """Get OSD IOPS (from Prometheus, stable) + throughput (from direct Ceph, real-time)."""
+    """Get OSD IOPS + throughput directly from ceph-exporter pods (no Prometheus lag).
+    IOPS comes from latency_count delta (same source as throughput), updating every 2-5s."""
     api_client, cfg = _get_cached_k8s_client(kubeconfig_text)
 
-    # IOPS: Prometheus rate[30s] — stable, no drops, exactly as before
-    result = _query_osd_iops_via_prom_proxy(api_client, cfg)
+    # All metrics from direct Ceph scrape: IOPS + throughput + pool breakdown + OSD status
+    result = _fetch_ceph_metrics_direct(api_client, cfg, cache_suffix='iops')
 
-    # Throughput: direct Ceph scrape (mgr + exporter) with delta calculation
-    throughput = _fetch_ceph_metrics_direct(api_client, cfg, cache_suffix='iops')
-    result.update(throughput)  # adds osd_throughput_mb and pool_throughput_mb
+    # Fallback: if direct scrape returns no IOPS (first call, needs 2 samples),
+    # try Prometheus proxy — at least shows something on first open.
+    if not result.get('osd_iops'):
+        prom = _query_osd_iops_via_prom_proxy(api_client, cfg)
+        if prom.get('osd_iops'):
+            result.update(prom)
 
     return result
 

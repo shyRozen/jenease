@@ -717,6 +717,7 @@ export default function ClusterDetail() {
                   showLauncher={false}
                   sharedRatesRef={isOwner ? sharedRatesRef : undefined}
                   cephAgg={cephAgg}
+                  poolHistory={poolHistoryRef.current}
                 />
               </div>
               {/* Right: launcher + recording (owner only) — shares ratesRef with list panel */}

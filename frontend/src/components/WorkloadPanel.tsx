@@ -230,6 +230,7 @@ export default function WorkloadPanel({
   sharedRatesRef,
   cephAgg,
   historyRef,
+  poolHistory,
 }: {
   clusterName: string
   kubeconfigUrl?: string
@@ -237,6 +238,7 @@ export default function WorkloadPanel({
   showList?: boolean
   sharedRatesRef?: React.MutableRefObject<Record<number, number>>
   cephAgg?: { r: number; w: number }
+  poolHistory?: DataPoint[]
   historyRef?: React.MutableRefObject<DataPoint[]>
 }) {
   const queryClient = useQueryClient()
@@ -1102,7 +1104,12 @@ export default function WorkloadPanel({
             </button>
           </div>
           <ThroughputChart
-            data={history}
+            data={showRW
+              ? history                                              // Ceph R/W: always fio history (has ceph_r/ceph_w)
+              : (history.some(d => d.total > 0)
+                  ? history                                         // Workloads: own fio data when available
+                  : (poolHistory ?? history))                       // Workloads: fall back to pool data (RBD/CephFS/NooBaa)
+            }
             series={showRW ? RW_SERIES : undefined}
             areaKey={showRW ? 'ceph_r' : undefined}
           />

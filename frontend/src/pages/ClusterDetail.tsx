@@ -399,6 +399,21 @@ export default function ClusterDetail() {
   // Last known IOPS per OSD — persists when query intermittently misses
   const lastOsdIopsRef = useRef<Record<string, { r: number; w: number }>>({})
 
+  // Seed osdHistoryRef from health.osd_iops as a fallback when SSE has no data.
+  // This makes the OSD section visible even when kubeconfig_url is unavailable.
+  useEffect(() => {
+    const healthIops = health?.osd_iops as Record<string, { r?: number; w?: number }> | undefined
+    if (!healthIops || Object.keys(osdHistoryRef.current).length > 0) return
+    const now = Date.now()
+    for (const [osd, io] of Object.entries(healthIops)) {
+      lastOsdIopsRef.current[osd] = { r: io.r ?? 0, w: io.w ?? 0 }
+      osdHistoryRef.current[osd] = [
+        { ts: now, total: 0, rbd: 0, cephfs: 0, noobaa: 0, r: 0, w: 0 } as unknown as DataPoint
+      ]
+    }
+    if (Object.keys(healthIops).length > 0) forceRender(v => v + 1)
+  }, [health?.osd_iops])
+
   useEffect(() => {
     if (!iopsData) return
     const now = Date.now()
@@ -469,7 +484,7 @@ export default function ClusterDetail() {
     if (cluster?.kubeconfig_url) setKubeconfigUrlForIops(cluster.kubeconfig_url)
   }, [cluster?.kubeconfig_url])
 
-  // Open SSE stream once we have both the kubeconfig URL and an active cluster
+  // Open SSE stream when we have a kubeconfig URL — real 1s data from Ceph admin sockets
   useEffect(() => {
     if (!isClusterActive || !kubeconfigUrlForIops) return
     const url = `/api/clusters/${name}/iops/stream?kubeconfig_url=${encodeURIComponent(kubeconfigUrlForIops)}`
@@ -479,6 +494,20 @@ export default function ClusterDetail() {
     }
     es.onerror = () => {} // EventSource auto-reconnects
     return () => es.close()
+  }, [name, kubeconfigUrlForIops, isClusterActive])
+
+  // Fallback: poll /iops every 5s when kubeconfig_url is unavailable (e.g. building clusters)
+  useEffect(() => {
+    if (!isClusterActive || kubeconfigUrlForIops) return
+    const poll = async () => {
+      try {
+        const data = await api.get(`/clusters/${name}/iops`)
+        if (data) setIopsData(data as IopsData)
+      } catch {}
+    }
+    poll()
+    const id = setInterval(poll, 5_000)
+    return () => clearInterval(id)
   }, [name, kubeconfigUrlForIops, isClusterActive])
 
   const podGroups = groupPods(details?.pods ?? [])

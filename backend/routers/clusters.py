@@ -799,14 +799,19 @@ async def cluster_stage(cluster_name: str, session: dict = Depends(get_session))
     if not build_num:
         return {"stage": None}
 
-    # Query wfapi/describe for stage info
+    # Query wfapi/describe for stage info — SSO fallback if Basic Auth is rejected
     try:
         async with httpx.AsyncClient(timeout=10, verify=False) as c:
             r = await c.get(
                 f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{build_num}/wfapi/describe",
                 auth=(session["username"], session["token"]),
             )
-            wf = r.json()
+        if r.status_code in (401, 403):
+            async with httpx.AsyncClient(timeout=10, verify=False) as c:
+                r = await c.get(
+                    f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{build_num}/wfapi/describe"
+                )
+        wf = r.json()
     except Exception:
         return {"stage": None}
 
@@ -866,7 +871,12 @@ async def cluster_destroy_stage(cluster_name: str, build_num: int, session: dict
                 f"{settings.jenkins_url}/job/{DESTROY_JOB}/{build_num}/wfapi/describe",
                 auth=(session["username"], session["token"]),
             )
-            wf = r.json()
+        if r.status_code in (401, 403):
+            async with httpx.AsyncClient(timeout=10, verify=False) as c:
+                r = await c.get(
+                    f"{settings.jenkins_url}/job/{DESTROY_JOB}/{build_num}/wfapi/describe"
+                )
+        wf = r.json()
     except Exception:
         return {"stage": None}
 

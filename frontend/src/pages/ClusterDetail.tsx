@@ -384,13 +384,10 @@ export default function ClusterDetail() {
 
   // Per-OSD throughput history (keyed by OSD id)
   const osdHistoryRef = useRef<Record<string, DataPoint[]>>({})
-  // Pool-level workload breakdown history (rbd/cephfs/noobaa total r+w per type)
-  const poolHistoryRef = useRef<DataPoint[]>([])
   // Workload history from WorkloadPanel (populated via historyRef prop)
   const workloadHistoryRef = useRef<DataPoint[]>([])
   // Current OSD aggregate totals (for text readout + WorkloadPanel R/W toggle)
   const [cephAgg, setCephAgg] = useState<{r: number, w: number}>({r: 0, w: 0})
-  const [osdMode, setOsdMode] = useState<'osd' | 'pool'>('osd')
   const [osdGridWidth, setOsdGridWidth] = useState(0)
   const osdGridRef = useRef<HTMLDivElement>(null)
   const [, forceRender] = useState(0)
@@ -421,17 +418,6 @@ export default function ClusterDetail() {
       const prev = osdHistoryRef.current[osd] ?? []
       const pt = { ts: now, total: r + w, rbd: 0, cephfs: 0, noobaa: 0, r, w } as unknown as DataPoint
       osdHistoryRef.current[osd] = [...prev.slice(-720), pt]
-    }
-
-    if (iopsData.pool_throughput_mb) {
-      const pools = iopsData.pool_throughput_mb as Record<string, { r?: number; w?: number }>
-      const rbd    = (pools.rbd?.r   ?? 0) + (pools.rbd?.w   ?? 0)
-      const cephfs = (pools.cephfs?.r ?? 0) + (pools.cephfs?.w ?? 0)
-      const noobaa = (pools.noobaa?.r ?? 0) + (pools.noobaa?.w ?? 0)
-      poolHistoryRef.current = [
-        ...poolHistoryRef.current.slice(-720),
-        { ts: now, total: rbd + cephfs + noobaa, rbd, cephfs, noobaa } as DataPoint,
-      ]
     }
 
     setCephAgg({ r: totalR, w: totalW })
@@ -635,7 +621,7 @@ export default function ClusterDetail() {
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
                         <p className="text-[9px] font-mono text-text-muted uppercase tracking-widest">OSD Throughput</p>
-                        {osdMode === 'osd' && (cephAgg.r > 0 || cephAgg.w > 0) && (
+                        {(cephAgg.r > 0 || cephAgg.w > 0) && (
                           <span className="text-[9px] font-mono text-text-muted">
                             R <span className="text-[#00d4ff]">{cephAgg.r.toFixed(1)}</span>
                             {' '}W <span className="text-[#50fa7b]">{cephAgg.w.toFixed(1)}</span>
@@ -646,28 +632,10 @@ export default function ClusterDetail() {
                           <span className="text-[9px] font-mono text-text-muted animate-pulse">Connecting…</span>
                         )}
                       </div>
-                      <div className="flex gap-1">
-                        <button onClick={() => setOsdMode('osd')}
-                          className={`text-[9px] font-mono px-2 py-0.5 rounded border transition-colors ${
-                            osdMode === 'osd'
-                              ? 'border-accent-cyan/60 text-accent-cyan bg-accent-cyan/10'
-                              : 'border-surface-4 text-text-muted hover:border-accent-cyan/30'
-                          }`}>
-                          Per OSD
-                        </button>
-                        <button onClick={() => setOsdMode('pool')}
-                          className={`text-[9px] font-mono px-2 py-0.5 rounded border transition-colors ${
-                            osdMode === 'pool'
-                              ? 'border-accent-cyan/60 text-accent-cyan bg-accent-cyan/10'
-                              : 'border-surface-4 text-text-muted hover:border-accent-cyan/30'
-                          }`}>
-                          By Pool
-                        </button>
-                      </div>
                     </div>
 
-                    {/* Per OSD mode: per-OSD R/W charts, 3 per row, shared Y-axis max */}
-                    {osdMode === 'osd' && Object.keys(osdHistoryRef.current).length > 0 && (() => {
+                    {/* Per OSD R/W charts, 3 per row, shared Y-axis max */}
+                    {Object.keys(osdHistoryRef.current).length > 0 && (() => {
                       const GAP = 8, COLS = 3
                       const cw = osdGridWidth > 0
                         ? Math.floor((osdGridWidth - GAP * (COLS - 1)) / COLS)
@@ -709,13 +677,6 @@ export default function ClusterDetail() {
                       )
                     })()}
 
-                    {/* By Pool mode: RBD / CephFS / NooBaa from Prometheus pool metrics */}
-                    {osdMode === 'pool' && poolHistoryRef.current.length > 0 && (
-                      <ThroughputChart
-                        data={poolHistoryRef.current}
-                        title="Pool Throughput"
-                      />
-                    )}
                   </div>
                 )}
 
@@ -725,10 +686,6 @@ export default function ClusterDetail() {
                   showLauncher={false}
                   sharedRatesRef={isOwner ? sharedRatesRef : undefined}
                   cephAgg={cephAgg}
-                  poolBreakdown={(() => {
-                    const last = poolHistoryRef.current[poolHistoryRef.current.length - 1]
-                    return last ? { rbd: last.rbd, cephfs: last.cephfs, noobaa: last.noobaa } : undefined
-                  })()}
                 />
               </div>
               {/* Right: launcher + recording (owner only) — shares ratesRef with list panel */}

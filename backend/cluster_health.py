@@ -877,17 +877,12 @@ def _fetch_iops_via_kubeconfig_sync(kubeconfig_text: str) -> dict:
 def osd_perf_stream_thread(kube_text: str, put_fn, stop_event) -> None:
     """Persistent exec into rook-ceph-tools pod.
 
-    Main loop: 'ceph tell osd.* perf dump' padded with a sleep so each iteration
-    takes exactly 2s (sleep = max(0, 2000 - elapsed_ms)). When ceph tell finishes
-    in <2s we sleep the remainder; when it takes >2s we skip the sleep. This gives
-    consistent ~2s SSE ticks with no big gaps.
-
-    Pool stats and osd tree run in a separate daemon thread via one-shot exec calls
-    (~6s + ~4s = 10s per cycle). Results are shared via a lock-protected dict and
-    included in each TICK result without ever blocking the main loop.
+    Single bash loop: 'ceph tell osd.* perf dump' padded with sleep so each
+    iteration is exactly 2s. Only ONE ceph command runs at a time — no concurrent
+    exec calls — so the Ceph Mon is never contended and ceph tell stays at 1-2s.
 
     Calls put_fn(result_dict) on each TICK, put_fn(None) when done."""
-    import json as _json, re as _re, threading as _threading
+    import json as _json, re as _re
     from kubernetes import client as _k8s
     from kubernetes.stream import stream as _k8s_stream
 
@@ -901,36 +896,6 @@ def osd_perf_stream_thread(kube_text: str, put_fn, stop_event) -> None:
         toolbox_pod = pods.items[0].metadata.name
     except Exception:
         put_fn(None); return
-
-    # ── Slow data thread ──────────────────────────────────────────────────────
-    # Runs pool stats (~6s) + osd tree (~4s) in a continuous loop.
-    # Never blocks the main ceph-tell loop.
-    slow_data: dict = {'pools': [], 'tree': {}}
-    slow_lock = _threading.Lock()
-
-    def _slow_loop():
-        while not stop_event.is_set():
-            for cmd, key in (
-                ('ceph osd pool stats -f json 2>/dev/null', 'pools'),
-                ('ceph osd tree -f json 2>/dev/null',       'tree'),
-            ):
-                if stop_event.is_set():
-                    return
-                try:
-                    out = _k8s_stream(
-                        core.connect_get_namespaced_pod_exec,
-                        toolbox_pod, 'openshift-storage',
-                        command=['bash', '-c', cmd],
-                        stderr=False, stdin=False, stdout=True, tty=False,
-                        _preload_content=True,
-                    )
-                    parsed = _json.loads(out)
-                    with slow_lock:
-                        slow_data[key] = parsed
-                except Exception:
-                    pass
-
-    _threading.Thread(target=_slow_loop, daemon=True).start()
 
     # ── Main bash loop ────────────────────────────────────────────────────────
     # Records start time, runs ceph tell, emits TICK, then sleeps the remainder
@@ -1045,31 +1010,6 @@ done
                             }
                         if osd_iops: result['osd_iops']          = osd_iops
                         if osd_thr:  result['osd_throughput_mb'] = osd_thr
-
-                    # Pull latest pool/tree data from the slow thread (non-blocking)
-                    with slow_lock:
-                        pool_stats_snap = list(slow_data['pools'])
-                        osd_tree_snap   = dict(slow_data['tree'])
-
-                    pool_thr: dict = {}
-                    for ps in pool_stats_snap:
-                        wtype = _pool_to_workload(ps.get('pool_name', ''))
-                        if wtype:
-                            cio = ps.get('client_io_rate', {})
-                            pool_thr.setdefault(wtype, {'r': 0.0, 'w': 0.0})
-                            pool_thr[wtype]['r'] = round(pool_thr[wtype]['r'] + cio.get('read_bytes_sec', 0) / 1_048_576, 3)
-                            pool_thr[wtype]['w'] = round(pool_thr[wtype]['w'] + cio.get('write_bytes_sec', 0) / 1_048_576, 3)
-                    if pool_thr: result['pool_throughput_mb'] = pool_thr
-
-                    osd_status: dict = {}
-                    for node in osd_tree_snap.get('nodes', []):
-                        if node.get('type') == 'osd':
-                            oid = str(node['id'])
-                            osd_status[oid] = {
-                                'up': 1 if node.get('status') == 'up' else 0,
-                                'in': 1 if (node.get('reweight') or 0) > 0 else 0,
-                            }
-                    if osd_status: result['osd_status'] = osd_status
 
                     if result:
                         put_fn(result)

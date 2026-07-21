@@ -876,10 +876,18 @@ def _fetch_iops_via_kubeconfig_sync(kubeconfig_text: str) -> dict:
 
 def osd_perf_stream_thread(kube_text: str, put_fn, stop_event) -> None:
     """Persistent exec into rook-ceph-tools pod.
-    Uses 'ceph tell osd.* perf dump' (wildcard) — one call reads all OSDs via cluster network,
-    takes ~2s on prod. Pool stats (6s) and osd tree (4s) run every 5th tick to keep the
-    main loop at ~2s. Calls put_fn(result_dict) on each TICK, put_fn(None) when done."""
-    import json as _json, re as _re
+
+    Main loop: 'ceph tell osd.* perf dump' padded with a sleep so each iteration
+    takes exactly 2s (sleep = max(0, 2000 - elapsed_ms)). When ceph tell finishes
+    in <2s we sleep the remainder; when it takes >2s we skip the sleep. This gives
+    consistent ~2s SSE ticks with no big gaps.
+
+    Pool stats and osd tree run in a separate daemon thread via one-shot exec calls
+    (~6s + ~4s = 10s per cycle). Results are shared via a lock-protected dict and
+    included in each TICK result without ever blocking the main loop.
+
+    Calls put_fn(result_dict) on each TICK, put_fn(None) when done."""
+    import json as _json, re as _re, threading as _threading
     from kubernetes import client as _k8s
     from kubernetes.stream import stream as _k8s_stream
 
@@ -894,23 +902,47 @@ def osd_perf_stream_thread(kube_text: str, put_fn, stop_event) -> None:
     except Exception:
         put_fn(None); return
 
-    # 'ceph tell osd.* perf dump' reads all OSDs in one Mon→OSD cluster-network call (~2s).
-    # No sleep — the command itself is the pacing. Pool stats (6s) and osd tree (4s) only
-    # run every 5th tick so the main graph updates every ~2s instead of 13s.
+    # ── Slow data thread ──────────────────────────────────────────────────────
+    # Runs pool stats (~6s) + osd tree (~4s) in a continuous loop.
+    # Never blocks the main ceph-tell loop.
+    slow_data: dict = {'pools': [], 'tree': {}}
+    slow_lock = _threading.Lock()
+
+    def _slow_loop():
+        while not stop_event.is_set():
+            for cmd, key in (
+                ('ceph osd pool stats -f json 2>/dev/null', 'pools'),
+                ('ceph osd tree -f json 2>/dev/null',       'tree'),
+            ):
+                if stop_event.is_set():
+                    return
+                try:
+                    out = _k8s_stream(
+                        core.connect_get_namespaced_pod_exec,
+                        toolbox_pod, 'openshift-storage',
+                        command=['bash', '-c', cmd],
+                        stderr=False, stdin=False, stdout=True, tty=False,
+                        _preload_content=True,
+                    )
+                    parsed = _json.loads(out)
+                    with slow_lock:
+                        slow_data[key] = parsed
+                except Exception:
+                    pass
+
+    _threading.Thread(target=_slow_loop, daemon=True).start()
+
+    # ── Main bash loop ────────────────────────────────────────────────────────
+    # Records start time, runs ceph tell, emits TICK, then sleeps the remainder
+    # of the 2s budget. Gives consistent ~2s intervals regardless of ceph tell speed.
     script = r'''
-tick=0
 while true; do
+  t0=$(date +%s%3N)
   ceph tell "osd.*" perf dump 2>/dev/null
   printf "TICK\n"
-  tick=$((tick+1))
-  if [ $((tick % 5)) -eq 0 ]; then
-    printf "POOLS_START\n"
-    ceph osd pool stats -f json 2>/dev/null
-    printf "POOLS_END\n"
-    printf "STATUS_START\n"
-    ceph osd tree -f json 2>/dev/null
-    printf "STATUS_END\n"
-  fi
+  elapsed=$(( $(date +%s%3N) - t0 ))
+  sleep_ms=$(( 2000 - elapsed ))
+  [ $sleep_ms -gt 0 ] && sleep $(awk -v ms=$sleep_ms 'BEGIN{printf "%.3f", ms/1000}')
 done
 '''
     try:
@@ -924,29 +956,22 @@ done
     except Exception:
         put_fn(None); return
 
-    # 'ceph tell osd.* perf dump' output format: each OSD on its own block:
-    #   osd.0: {
-    #       "AsyncMessenger::...": {...},
-    #       "osd": {"op_r_out_bytes": N, "op_w_in_bytes": N, ...}
-    #   }
-    #   osd.1: { ... }
-    # We detect the start with a regex and track JSON brace depth to find the end.
+    # ── Stream parser ─────────────────────────────────────────────────────────
+    # 'ceph tell osd.* perf dump' output: "osd.N: { ... }" blocks back-to-back.
+    # Detect each block with regex, track JSON brace depth to find the end.
     OSD_LINE_RE = _re.compile(r'^osd\.(\d+): \{')
 
     buf             = ''
     current_osd     = None
     lines_buf: list = []
     brace_depth     = 0
-    current_section = None   # 'osd' | 'pools' | 'status' | None
 
     osd_bytes_curr: dict = {}
-    pool_stats_curr: list = []   # persists across ticks; only updated on POOLS_END
-    osd_tree_curr: dict  = {}   # persists across ticks; only updated on STATUS_END
     prev_osd_bytes: dict = {}
     prev_ts = time.monotonic()
 
     def _commit_osd():
-        nonlocal current_osd, lines_buf, brace_depth, current_section
+        nonlocal current_osd, lines_buf, brace_depth
         if current_osd and lines_buf:
             try:
                 d = _json.loads('\n'.join(lines_buf))
@@ -961,7 +986,7 @@ done
                 }
             except Exception:
                 pass
-        current_osd = None; lines_buf = []; brace_depth = 0; current_section = None
+        current_osd = None; lines_buf = []; brace_depth = 0
 
     try:
         while ws.is_open() and not stop_event.is_set():
@@ -978,17 +1003,15 @@ done
                 if not line:
                     continue
 
-                # New OSD block: "osd.N: {"
                 m = OSD_LINE_RE.match(line)
                 if m:
                     _commit_osd()
                     current_osd = m.group(1)
-                    current_section = 'osd'
-                    lines_buf = ['{']   # opening brace from this line
+                    lines_buf = ['{']
                     brace_depth = 1
                     continue
 
-                if current_section == 'osd':
+                if current_osd is not None:
                     lines_buf.append(line)
                     brace_depth += line.count('{') - line.count('}')
                     if brace_depth <= 0:
@@ -1003,7 +1026,7 @@ done
 
                     if dt > 0.1 and prev_osd_bytes:
                         osd_iops: dict = {}
-                        osd_thr: dict = {}
+                        osd_thr: dict  = {}
                         for oid, curr in osd_bytes_curr.items():
                             prev = prev_osd_bytes.get(oid)
                             if prev is None:
@@ -1023,9 +1046,13 @@ done
                         if osd_iops: result['osd_iops']          = osd_iops
                         if osd_thr:  result['osd_throughput_mb'] = osd_thr
 
-                    # Pool throughput from last slow run — persists across ticks
+                    # Pull latest pool/tree data from the slow thread (non-blocking)
+                    with slow_lock:
+                        pool_stats_snap = list(slow_data['pools'])
+                        osd_tree_snap   = dict(slow_data['tree'])
+
                     pool_thr: dict = {}
-                    for ps in pool_stats_curr:
+                    for ps in pool_stats_snap:
                         wtype = _pool_to_workload(ps.get('pool_name', ''))
                         if wtype:
                             cio = ps.get('client_io_rate', {})
@@ -1034,9 +1061,8 @@ done
                             pool_thr[wtype]['w'] = round(pool_thr[wtype]['w'] + cio.get('write_bytes_sec', 0) / 1_048_576, 3)
                     if pool_thr: result['pool_throughput_mb'] = pool_thr
 
-                    # OSD up/in status from last slow run — persists across ticks
                     osd_status: dict = {}
-                    for node in osd_tree_curr.get('nodes', []):
+                    for node in osd_tree_snap.get('nodes', []):
                         if node.get('type') == 'osd':
                             oid = str(node['id'])
                             osd_status[oid] = {
@@ -1051,25 +1077,6 @@ done
                     prev_osd_bytes = {k: dict(v) for k, v in osd_bytes_curr.items()}
                     prev_ts = now_ts
                     osd_bytes_curr = {}
-                    continue
-
-                if line == 'POOLS_START':
-                    current_section = 'pools'; lines_buf = []; continue
-                if line == 'POOLS_END':
-                    if lines_buf:
-                        try: pool_stats_curr = _json.loads('\n'.join(lines_buf))
-                        except Exception: pass
-                    lines_buf = []; current_section = None; continue
-                if line == 'STATUS_START':
-                    current_section = 'status'; lines_buf = []; continue
-                if line == 'STATUS_END':
-                    if lines_buf:
-                        try: osd_tree_curr = _json.loads('\n'.join(lines_buf))
-                        except Exception: pass
-                    lines_buf = []; current_section = None; continue
-
-                if current_section in ('pools', 'status'):
-                    lines_buf.append(line)
 
     except Exception:
         pass

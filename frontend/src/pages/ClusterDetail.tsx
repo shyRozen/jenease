@@ -463,16 +463,18 @@ export default function ClusterDetail() {
   })
   const cluster = clusterList.find((c: any) => c.cluster_name === name)
 
-  // SSE stream — backend finds kubeconfig via Jenkins, no frontend param needed
+  // SSE stream — pass kubeconfig_url like /fstrim and /worker-nodes do
+  const kubeconfigUrl = cluster?.kubeconfig_url
   useEffect(() => {
-    if (!isClusterActive) return
-    const es = new EventSource(`/api/clusters/${name}/iops/stream`, { withCredentials: true })
+    if (!isClusterActive || !kubeconfigUrl) return
+    const url = `/api/clusters/${name}/iops/stream?kubeconfig_url=${encodeURIComponent(kubeconfigUrl)}`
+    const es = new EventSource(url, { withCredentials: true })
     es.onmessage = (e) => {
       try { setIopsData(JSON.parse(e.data)) } catch {}
     }
     es.onerror = () => {}
     return () => es.close()
-  }, [name, isClusterActive])
+  }, [name, isClusterActive, kubeconfigUrl])
 
   const podGroups = groupPods(details?.pods ?? [])
   const masters = health?.nodes?.filter(n => n.role === 'master') ?? []

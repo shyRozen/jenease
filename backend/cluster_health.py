@@ -876,17 +876,16 @@ def _fetch_iops_via_kubeconfig_sync(kubeconfig_text: str) -> dict:
 
 def osd_perf_stream_thread(kube_text: str, put_fn, stop_event) -> None:
     """Persistent exec into rook-ceph-tools pod.
-    Runs a shell loop that reads every OSD's admin socket + pool stats every 1s.
-    Admin socket reads are sub-millisecond Unix IPC — true real-time counter data.
-    Calls put_fn(result_dict) on each TICK, put_fn(None) when done."""
-    import json as _json, threading as _threading
+    Uses 'ceph tell osd.* perf dump' (wildcard) — one call reads all OSDs via cluster network,
+    takes ~2s on prod. Pool stats (6s) and osd tree (4s) run every 5th tick to keep the
+    main loop at ~2s. Calls put_fn(result_dict) on each TICK, put_fn(None) when done."""
+    import json as _json, re as _re
     from kubernetes import client as _k8s
     from kubernetes.stream import stream as _k8s_stream
 
     api_client, cfg = _get_cached_k8s_client(kube_text)
     core = _k8s.CoreV1Api(api_client)
 
-    # Find toolbox pod
     try:
         pods = core.list_namespaced_pod('openshift-storage', label_selector='app=rook-ceph-tools')
         if not pods.items:
@@ -895,30 +894,23 @@ def osd_perf_stream_thread(kube_text: str, put_fn, stop_event) -> None:
     except Exception:
         put_fn(None); return
 
-    # Script: loop every 1s, read perf counters from each OSD via Ceph cluster network.
-    # "ceph tell osd.X perf dump" routes through Mon→OSD (not local admin socket),
-    # so it works from the toolbox pod without needing per-node socket access.
-    # Background jobs + temp files make all OSD tells run in PARALLEL — total time
-    # equals the slowest single OSD (~50-100ms) instead of N * latency.
+    # 'ceph tell osd.* perf dump' reads all OSDs in one Mon→OSD cluster-network call (~2s).
+    # No sleep — the command itself is the pacing. Pool stats (6s) and osd tree (4s) only
+    # run every 5th tick so the main graph updates every ~2s instead of 13s.
     script = r'''
+tick=0
 while true; do
-  tmpd=$(mktemp -d)
-  for osd in $(ceph osd ls 2>/dev/null); do
-    ( printf "OSD_START %s\n" "$osd"
-      ceph tell osd.$osd perf dump 2>/dev/null
-      printf "OSD_END\n" ) > "$tmpd/$osd.txt" &
-  done
-  wait
-  cat "$tmpd"/*.txt 2>/dev/null
-  rm -rf "$tmpd"
-  printf "POOLS_START\n"
-  ceph osd pool stats -f json 2>/dev/null
-  printf "POOLS_END\n"
-  printf "STATUS_START\n"
-  ceph osd tree -f json 2>/dev/null
-  printf "STATUS_END\n"
+  ceph tell "osd.*" perf dump 2>/dev/null
   printf "TICK\n"
-  sleep 1
+  tick=$((tick+1))
+  if [ $((tick % 5)) -eq 0 ]; then
+    printf "POOLS_START\n"
+    ceph osd pool stats -f json 2>/dev/null
+    printf "POOLS_END\n"
+    printf "STATUS_START\n"
+    ceph osd tree -f json 2>/dev/null
+    printf "STATUS_END\n"
+  fi
 done
 '''
     try:
@@ -932,19 +924,48 @@ done
     except Exception:
         put_fn(None); return
 
-    buf              = ''
-    current_section  = None
-    current_osd      = None
-    lines_buf: list  = []
+    # 'ceph tell osd.* perf dump' output format: each OSD on its own block:
+    #   osd.0: {
+    #       "AsyncMessenger::...": {...},
+    #       "osd": {"op_r_out_bytes": N, "op_w_in_bytes": N, ...}
+    #   }
+    #   osd.1: { ... }
+    # We detect the start with a regex and track JSON brace depth to find the end.
+    OSD_LINE_RE = _re.compile(r'^osd\.(\d+): \{')
+
+    buf             = ''
+    current_osd     = None
+    lines_buf: list = []
+    brace_depth     = 0
+    current_section = None   # 'osd' | 'pools' | 'status' | None
+
     osd_bytes_curr: dict = {}
-    pool_stats_curr: list = []
-    osd_tree_curr: dict  = {}
+    pool_stats_curr: list = []   # persists across ticks; only updated on POOLS_END
+    osd_tree_curr: dict  = {}   # persists across ticks; only updated on STATUS_END
     prev_osd_bytes: dict = {}
     prev_ts = time.monotonic()
 
+    def _commit_osd():
+        nonlocal current_osd, lines_buf, brace_depth, current_section
+        if current_osd and lines_buf:
+            try:
+                d = _json.loads('\n'.join(lines_buf))
+                s = d.get('osd', {})
+                rl = s.get('op_r_latency') or {}
+                wl = s.get('op_w_latency') or {}
+                osd_bytes_curr[current_osd] = {
+                    'r':     int(s.get('op_r_out_bytes', 0) or 0),
+                    'w':     int(s.get('op_w_in_bytes',  0) or 0),
+                    'r_ops': int(rl.get('avgcount') or 0),
+                    'w_ops': int(wl.get('avgcount') or 0),
+                }
+            except Exception:
+                pass
+        current_osd = None; lines_buf = []; brace_depth = 0; current_section = None
+
     try:
         while ws.is_open() and not stop_event.is_set():
-            ws.update(timeout=2)
+            ws.update(timeout=3)
             if not ws.peek_stdout():
                 continue
             chunk = ws.read_stdout()
@@ -957,49 +978,32 @@ done
                 if not line:
                     continue
 
-                if line.startswith('OSD_START '):
-                    current_osd = line.split(' ', 1)[1]
+                # New OSD block: "osd.N: {"
+                m = OSD_LINE_RE.match(line)
+                if m:
+                    _commit_osd()
+                    current_osd = m.group(1)
                     current_section = 'osd'
-                    lines_buf = []
-                elif line == 'OSD_END':
-                    if current_osd and lines_buf:
-                        try:
-                            d = _json.loads('\n'.join(lines_buf))
-                            s = d.get('osd', {})
-                            rl = s.get('op_r_latency') or {}
-                            wl = s.get('op_w_latency') or {}
-                            osd_bytes_curr[current_osd] = {
-                                'r': int(s.get('op_r_out_bytes', 0) or 0),
-                                'w': int(s.get('op_w_in_bytes', 0) or 0),
-                                'r_ops': int((rl.get('avgcount') or 0)),
-                                'w_ops': int((wl.get('avgcount') or 0)),
-                            }
-                        except Exception:
-                            pass
-                    current_osd = None; lines_buf = []
-                elif line == 'POOLS_START':
-                    current_section = 'pools'; lines_buf = []
-                elif line == 'POOLS_END':
-                    if lines_buf:
-                        try: pool_stats_curr = _json.loads('\n'.join(lines_buf))
-                        except Exception: pass
-                    lines_buf = []
-                elif line == 'STATUS_START':
-                    current_section = 'status'; lines_buf = []
-                elif line == 'STATUS_END':
-                    if lines_buf:
-                        try: osd_tree_curr = _json.loads('\n'.join(lines_buf))
-                        except Exception: pass
-                    lines_buf = []
-                elif line == 'TICK':
+                    lines_buf = ['{']   # opening brace from this line
+                    brace_depth = 1
+                    continue
+
+                if current_section == 'osd':
+                    lines_buf.append(line)
+                    brace_depth += line.count('{') - line.count('}')
+                    if brace_depth <= 0:
+                        _commit_osd()
+                    continue
+
+                if line == 'TICK':
+                    _commit_osd()
                     now_ts = time.monotonic()
-                    dt     = now_ts - prev_ts
+                    dt = now_ts - prev_ts
                     result: dict = {}
 
-                    # Per-OSD IOPS + throughput (delta from admin socket counters)
                     if dt > 0.1 and prev_osd_bytes:
                         osd_iops: dict = {}
-                        osd_thr:  dict = {}
+                        osd_thr: dict = {}
                         for oid, curr in osd_bytes_curr.items():
                             prev = prev_osd_bytes.get(oid)
                             if prev is None:
@@ -1016,23 +1020,21 @@ done
                                 'r': int(dr_ops / dt),
                                 'w': int(dw_ops / dt),
                             }
-                        if osd_iops:   result['osd_iops']          = osd_iops
-                        if osd_thr:    result['osd_throughput_mb'] = osd_thr
+                        if osd_iops: result['osd_iops']          = osd_iops
+                        if osd_thr:  result['osd_throughput_mb'] = osd_thr
 
-                    # Pool throughput — already a rate from Ceph monitor, no delta needed
+                    # Pool throughput from last slow run — persists across ticks
                     pool_thr: dict = {}
                     for ps in pool_stats_curr:
                         wtype = _pool_to_workload(ps.get('pool_name', ''))
                         if wtype:
                             cio = ps.get('client_io_rate', {})
                             pool_thr.setdefault(wtype, {'r': 0.0, 'w': 0.0})
-                            pool_thr[wtype]['r'] = round(
-                                pool_thr[wtype]['r'] + cio.get('read_bytes_sec', 0) / 1_048_576, 3)
-                            pool_thr[wtype]['w'] = round(
-                                pool_thr[wtype]['w'] + cio.get('write_bytes_sec', 0) / 1_048_576, 3)
+                            pool_thr[wtype]['r'] = round(pool_thr[wtype]['r'] + cio.get('read_bytes_sec', 0) / 1_048_576, 3)
+                            pool_thr[wtype]['w'] = round(pool_thr[wtype]['w'] + cio.get('write_bytes_sec', 0) / 1_048_576, 3)
                     if pool_thr: result['pool_throughput_mb'] = pool_thr
 
-                    # OSD up/in status from osd tree
+                    # OSD up/in status from last slow run — persists across ticks
                     osd_status: dict = {}
                     for node in osd_tree_curr.get('nodes', []):
                         if node.get('type') == 'osd':
@@ -1049,9 +1051,26 @@ done
                     prev_osd_bytes = {k: dict(v) for k, v in osd_bytes_curr.items()}
                     prev_ts = now_ts
                     osd_bytes_curr = {}
-                    pool_stats_curr = []
-                elif current_section:
+                    continue
+
+                if line == 'POOLS_START':
+                    current_section = 'pools'; lines_buf = []; continue
+                if line == 'POOLS_END':
+                    if lines_buf:
+                        try: pool_stats_curr = _json.loads('\n'.join(lines_buf))
+                        except Exception: pass
+                    lines_buf = []; current_section = None; continue
+                if line == 'STATUS_START':
+                    current_section = 'status'; lines_buf = []; continue
+                if line == 'STATUS_END':
+                    if lines_buf:
+                        try: osd_tree_curr = _json.loads('\n'.join(lines_buf))
+                        except Exception: pass
+                    lines_buf = []; current_section = None; continue
+
+                if current_section in ('pools', 'status'):
                     lines_buf.append(line)
+
     except Exception:
         pass
     finally:

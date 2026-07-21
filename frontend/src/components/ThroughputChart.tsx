@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { memo, useEffect, useId, useRef, useState } from 'react'
 
 export interface SeriesDef {
   key: string
@@ -52,7 +52,7 @@ function niceMax(v: number) {
   return Math.ceil(v / mag) * mag
 }
 
-export default function ThroughputChart({
+function ThroughputChart({
   data,
   visibleSecs,
   series: customSeries,
@@ -167,8 +167,8 @@ export default function ThroughputChart({
   }
   function onPointerUp() { isDragging.current = false }
 
-  const isLive = offset < 1
-  const last   = visible.length > 0 ? visible[visible.length - 1] : null
+  const isLive    = offset < 1
+  const last      = visible.length > 0 ? visible[visible.length - 1] : null
   const fillColor = fillKey ? (activeSeries.find(s => s.key === fillKey)?.color ?? '#00d4ff') : '#00d4ff'
 
   return (
@@ -295,3 +295,8 @@ export default function ThroughputChart({
     </div>
   )
 }
+
+// memo: OSD charts only re-render when SSE data arrives (new array reference + new fixedMax).
+// Health/details query re-renders in ClusterDetail don't propagate here.
+// Fio charts in WorkloadPanel are unaffected — WorkloadPanel provides new data every second.
+export default memo(ThroughputChart)

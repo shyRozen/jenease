@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import ThroughputChart, { type DataPoint, SERIES, RW_SERIES } from './ThroughputChart'
@@ -60,12 +60,18 @@ function WorkloadCard({
   onDelete,
   onRateUpdate,
   autoDelete = false,
+  registerLogCallback,
+  collapsed = false,
+  onToggleCollapse,
 }: {
   workload: WorkloadEntry
   clusterName: string
   onDelete: () => void
   onRateUpdate?: (id: number, rateMb: number | null) => void
   autoDelete?: boolean
+  registerLogCallback?: (id: number, cb: ((data: any) => void) | null) => void
+  collapsed?: boolean
+  onToggleCollapse?: () => void
 }) {
   const [logs, setLogs]           = useState<string[]>([])
   const [progress, setProgress]   = useState<number | null>(null)
@@ -80,35 +86,44 @@ function WorkloadCard({
   const isActive = workload.phase === 'Running' || workload.phase === 'Pending' ||
     (workload.phase === 'Unknown' && ageMs < 10 * 60 * 1000)
 
-  useEffect(() => {
-    if (!isActive || cleaning) return
-    const es = new EventSource(`/api/clusters/${clusterName}/workloads/${workload.id}/logs`, { withCredentials: true })
-    esRef.current = es
-    const streamStart = Date.now()
-
-    es.onmessage = (e) => {
-      const data = JSON.parse(e.data)
-      if (data.line) {
-        const elapsed = ((Date.now() - streamStart) / 1000).toFixed(1)
-        setLogs(prev => [...prev, `[+${elapsed}s] ${data.line}`].slice(-150))
-      }
-      if (data.progress != null) setProgress(data.progress)
-      if (data.eta)              setEta(data.eta)
-      if (data.rate) {
-        setRate(data.rate)
-        // Parse to MB/s number for aggregation: "234MiB/s", "7MB/s", "45MB/s"
-        const m = data.rate.match(/^([\d.]+)\s*(MiB|MB|KiB|KB|GiB|GB)\/s/)
-        if (m) {
-          const val = parseFloat(m[1])
-          const unit = m[2]
-          const mb = unit.startsWith('K') ? val / 1024 : unit.startsWith('G') ? val * 1024 : val
-          onRateUpdate?.(workload.id, mb)
-        }
+  // Process a raw log event — shared between multiplexed and standalone SSE paths
+  const streamStartRef = useRef(Date.now())
+  function processLogEvent(data: any) {
+    if (data.line) {
+      const elapsed = ((Date.now() - streamStartRef.current) / 1000).toFixed(1)
+      setLogs(prev => [...prev, `[+${elapsed}s] ${data.line}`].slice(-150))
+    }
+    if (data.progress != null) setProgress(data.progress)
+    if (data.eta)              setEta(data.eta)
+    if (data.rate) {
+      setRate(data.rate)
+      const m = data.rate.match(/^([\d.]+)\s*(MiB|MB|KiB|KB|GiB|GB)\/s/)
+      if (m) {
+        const val = parseFloat(m[1])
+        const unit = m[2]
+        const mb = unit.startsWith('K') ? val / 1024 : unit.startsWith('G') ? val * 1024 : val
+        onRateUpdate?.(workload.id, mb)
       }
     }
+  }
+
+  useEffect(() => {
+    if (!isActive || cleaning) return
+    streamStartRef.current = Date.now()
+
+    if (registerLogCallback) {
+      // Multiplexed mode: register with parent's single SSE — no per-card connection
+      registerLogCallback(workload.id, processLogEvent)
+      return () => { registerLogCallback(workload.id, null); onRateUpdate?.(workload.id, null) }
+    }
+
+    // Standalone fallback (page reload / no parent SSE)
+    const es = new EventSource(`/api/clusters/${clusterName}/workloads/${workload.id}/logs`, { withCredentials: true })
+    esRef.current = es
+    es.onmessage = (e) => { try { processLogEvent(JSON.parse(e.data)) } catch {} }
     es.onerror = () => { es.close(); onRateUpdate?.(workload.id, null) }
     return () => { es.close(); esRef.current = null; onRateUpdate?.(workload.id, null) }
-  }, [workload.id, isActive, cleaning, clusterName])
+  }, [workload.id, isActive, cleaning, clusterName, !!registerLogCallback])
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
@@ -146,10 +161,82 @@ function WorkloadCard({
     return h > 0 ? `${h}h ${m % 60}m` : `${m}m`
   })()
 
+  const lastLog = logs[logs.length - 1] ?? ''
+  const phaseDot = workload.phase === 'Running'
+    ? 'bg-accent-cyan animate-pulse'
+    : workload.phase === 'Pending' ? 'bg-accent-amber animate-pulse' : 'bg-surface-4'
+
+  // ── Collapsed / compact bar ──────────────────────────────────────────────
+  if (collapsed) {
+    const pct = progress != null ? Math.min(progress, 100) : 0
+    return (
+      <div
+        className="border border-surface-4 rounded-lg flex items-center gap-2 px-3 py-2.5 bg-surface-2 hover:border-surface-3 transition-colors cursor-pointer select-none"
+        onClick={onToggleCollapse}
+        title="Click to expand terminal"
+      >
+        {/* Status dot */}
+        <span className={`w-2 h-2 rounded-full flex-shrink-0 ${phaseDot}`} />
+
+        {/* Type badge */}
+        <span className={`text-[9px] font-mono font-semibold border rounded px-1 py-0.5 flex-shrink-0 ${TYPE_COLORS[workload.workload_type] ?? 'text-text-secondary border-surface-4'}`}>
+          {TYPE_LABELS[workload.workload_type] ?? workload.workload_type}
+        </span>
+        <span className="text-[9px] font-mono text-text-muted flex-shrink-0">{workload.size_gb}GB {workload.mode}</span>
+
+        {/* Last log line */}
+        <span className="text-[9px] font-mono text-text-muted flex-1 truncate min-w-0">
+          {lastLog
+            ? lastLog.replace(/^\[.*?\]\s*/, '')   // strip timestamp prefix
+            : workload.phase === 'Pending' ? 'waiting for pod…' : '—'}
+        </span>
+
+        {/* Thick progress bar with rate inside */}
+        <div className="flex-shrink-0 w-44 relative h-6 bg-surface-3 rounded overflow-hidden">
+          {progress === null ? (
+            <div className="h-full w-full bg-accent-cyan/20 animate-pulse" />
+          ) : (
+            <div
+              className="h-full bg-accent-cyan/70 transition-all duration-500 rounded"
+              style={{ width: `${pct}%` }}
+            />
+          )}
+          <div className="absolute inset-0 flex items-center justify-between px-2">
+            <span className="text-[9px] font-mono text-white/80 font-semibold">
+              {rate ? `${rate}/s` : ''}
+            </span>
+            <span className="text-[9px] font-mono text-white/70">
+              {progress != null ? `${progress.toFixed(0)}%` : ''}
+            </span>
+          </div>
+        </div>
+
+        {/* Expand icon */}
+        <span className="text-[10px] text-text-muted flex-shrink-0 ml-1">▸</span>
+
+        {/* Delete */}
+        {!cleaning && (
+          <button
+            onClick={e => { e.stopPropagation(); handleDelete() }}
+            className={`text-[9px] font-mono ml-1 flex-shrink-0 transition-colors ${confirmDelete ? 'text-accent-red' : 'text-text-muted hover:text-accent-red'}`}
+          >
+            {confirmDelete ? '✓' : '✕'}
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  // ── Expanded / full view ─────────────────────────────────────────────────
   return (
     <div className="border border-surface-4 rounded-lg overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-2 bg-surface-2 border-b border-surface-4">
+      <div
+        className="flex items-center gap-2 px-3 py-2 bg-surface-2 border-b border-surface-4 cursor-pointer"
+        onClick={onToggleCollapse}
+        title="Click to collapse terminal"
+      >
+        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${phaseDot}`} />
         <span className={`text-[10px] font-mono font-semibold border rounded px-1.5 py-0.5 ${TYPE_COLORS[workload.workload_type] ?? 'text-text-secondary border-surface-4'}`}>
           {TYPE_LABELS[workload.workload_type] ?? workload.workload_type}
         </span>
@@ -157,14 +244,14 @@ function WorkloadCard({
         <span className="text-xs font-mono text-text-muted">{workload.mode}</span>
         <span className="text-xs font-mono text-text-muted">{workload.pattern}</span>
         <span className={`text-[10px] font-mono ml-auto ${PHASE_COLORS[workload.phase] ?? 'text-text-muted'}`}>
-          {workload.phase === 'Running' && <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent-cyan animate-pulse mr-1" />}
           {workload.phase}
         </span>
         <span className="text-[10px] font-mono text-text-muted">{age}</span>
+        <span className="text-[10px] text-text-muted ml-1">▾</span>
         {!cleaning && (
           <>
             <button
-              onClick={handleDelete}
+              onClick={e => { e.stopPropagation(); handleDelete() }}
               className={`text-[10px] font-mono transition-colors ml-1 ${
                 confirmDelete ? 'text-accent-red' : 'text-text-muted hover:text-accent-red'
               }`}
@@ -173,7 +260,7 @@ function WorkloadCard({
             </button>
             {confirmDelete && (
               <button
-                onClick={() => setConfirmDelete(false)}
+                onClick={e => { e.stopPropagation(); setConfirmDelete(false) }}
                 className="text-[10px] font-mono text-text-muted hover:text-text-primary"
               >
                 Cancel
@@ -409,6 +496,41 @@ export default function WorkloadPanel({
   const activeWorkloads = workloads.filter(w => w.phase === 'Running' || w.phase === 'Pending')
   // Reset clearAll once all workloads have been removed
   useEffect(() => { if (clearAll && workloads.length === 0) setClearAll(false) }, [clearAll, workloads.length])
+
+  // Collapse / expand terminals
+  const [allCollapsed, setAllCollapsed] = useState(false)
+  const [cardOverrides, setCardOverrides] = useState<Record<number, boolean>>({})
+  function isCollapsed(id: number) { return id in cardOverrides ? cardOverrides[id] : allCollapsed }
+  function toggleCard(id: number) { setCardOverrides(p => ({ ...p, [id]: !isCollapsed(id) })) }
+  function toggleAll() { setAllCollapsed(p => !p); setCardOverrides({}) }
+
+  // ── Multiplexed log SSE ────────────────────────────────────────────────────
+  // One SSE connection for ALL active workloads — bypasses browser HTTP/1.1
+  // connection limit (~6 per origin) that previously capped visible cards at 5.
+  const logCallbacksRef = useRef<Map<number, (data: any) => void>>(new Map())
+  const activeIds = activeWorkloads.map(w => w.id).sort().join(',')
+
+  useEffect(() => {
+    if (!activeIds || !showList) return
+    const es = new EventSource(
+      `/api/clusters/${clusterName}/workloads/logs/multi?ids=${activeIds}`,
+      { withCredentials: true }
+    )
+    es.onmessage = (e) => {
+      try {
+        const { workload_id, ...data } = JSON.parse(e.data)
+        logCallbacksRef.current.get(workload_id)?.(data)
+      } catch {}
+    }
+    es.onerror = () => {}
+    return () => es.close()
+  }, [activeIds, clusterName, showList])
+
+  // Stable function — same ref across renders, so WorkloadCard useEffect doesn't re-fire
+  const registerLogCallback = useCallback((wlId: number, cb: ((data: any) => void) | null) => {
+    if (cb) logCallbacksRef.current.set(wlId, cb)
+    else    logCallbacksRef.current.delete(wlId)
+  }, [])
   const { data: healthData } = useQuery<{ ceph_capacity?: { health?: string }; degraded_reason?: string; status?: string }>({
     queryKey: ['health', clusterName],
     queryFn: () => api.get(`/clusters/${clusterName}/health`),
@@ -884,15 +1006,15 @@ export default function WorkloadPanel({
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-1.5">
               <span className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Copies</span>
-              <input
-                type="number" min={1} max={32} value={launchCount}
-                list="launch-count-opts"
-                onChange={e => setLaunchCount(Math.max(1, Number(e.target.value) || 1))}
-                className="w-12 text-[10px] font-mono bg-surface-3 border border-surface-4 rounded px-1 py-0.5 text-accent-cyan outline-none text-center"
-              />
-              <datalist id="launch-count-opts">
-                {[1,2,4,8,16].map(n => <option key={n} value={n} />)}
-              </datalist>
+              <select
+                value={launchCount}
+                onChange={e => setLaunchCount(Number(e.target.value))}
+                className="text-[10px] font-mono bg-surface-3 border border-surface-4 rounded px-1 py-0.5 text-accent-cyan outline-none"
+              >
+                {Array.from({ length: 15 }, (_, i) => i + 1).map(n => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
             </div>
             <label className="flex items-center gap-1.5 cursor-pointer">
               <input type="checkbox" checked={launchSync} onChange={e => setLaunchSync(e.target.checked)}
@@ -946,15 +1068,15 @@ export default function WorkloadPanel({
                   className="w-12 text-[10px] font-mono bg-surface-3 border border-surface-4 rounded px-1 py-0.5 text-accent-amber outline-none text-center"
                 />
                 <span className="text-[9px] font-mono text-text-muted">s ×</span>
-                <input
-                  type="number" min={1} max={32} value={item.count ?? 1}
-                  list={`count-opts-${item.id}`}
-                  onChange={e => setSeqItems(prev => prev.map(i => i.id === item.id ? { ...i, count: Math.max(1, Number(e.target.value) || 1) } : i))}
-                  className="w-10 text-[10px] font-mono bg-surface-3 border border-surface-4 rounded px-1 py-0.5 text-accent-cyan outline-none text-center"
-                />
-                <datalist id={`count-opts-${item.id}`}>
-                  {[1,2,4,8,16].map(n => <option key={n} value={n} />)}
-                </datalist>
+                <select
+                  value={item.count ?? 1}
+                  onChange={e => setSeqItems(prev => prev.map(i => i.id === item.id ? { ...i, count: Number(e.target.value) } : i))}
+                  className="text-[10px] font-mono bg-surface-3 border border-surface-4 rounded px-1 py-0.5 text-accent-cyan outline-none"
+                >
+                  {Array.from({ length: 15 }, (_, i) => i + 1).map(n => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
                 <span className="text-[10px] font-mono text-text-secondary flex-1 truncate">{seqItemLabel(item)}</span>
                 <button onClick={() => setSeqItems(prev => prev.filter(i => i.id !== item.id))}
                   className="text-text-muted hover:text-accent-red transition-colors shrink-0">
@@ -1219,7 +1341,15 @@ export default function WorkloadPanel({
       {showList && workloads.length > 0 && (
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <p className="text-[9px] font-mono text-text-muted">{workloads.length} workload{workloads.length !== 1 ? 's' : ''}</p>
+            <div className="flex items-center gap-2">
+              <p className="text-[9px] font-mono text-text-muted">{workloads.length} workload{workloads.length !== 1 ? 's' : ''}</p>
+              <button
+                onClick={toggleAll}
+                className="text-[9px] font-mono text-text-muted hover:text-accent-cyan transition-colors"
+              >
+                {allCollapsed ? '▸ Expand terminals' : '▾ Collapse terminals'}
+              </button>
+            </div>
             <div className="flex items-center gap-2">
               {confirmClearAll && !clearAll && (
                 <>
@@ -1255,6 +1385,9 @@ export default function WorkloadPanel({
               clusterName={clusterName}
               autoDelete={clearAll}
               onRateUpdate={handleRateUpdate}
+              registerLogCallback={registerLogCallback}
+              collapsed={isCollapsed(w.id)}
+              onToggleCollapse={() => toggleCard(w.id)}
               onDelete={() => {
                 setRates(prev => { const n = {...prev}; delete n[w.id]; return n })
                 queryClient.invalidateQueries({ queryKey: ['workloads', clusterName] })

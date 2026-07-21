@@ -436,8 +436,103 @@ async def cluster_health(cluster_name: str, session: dict = Depends(get_session)
     }
 
 
+_NODE_RESOURCES_CACHE: dict[str, tuple[dict, float]] = {}
+_NODE_RESOURCES_TTL = 30
+
 _WORKER_NODES_CACHE: dict[str, tuple[dict, float]] = {}
 _WORKER_NODES_TTL = 60
+
+
+@router.get("/{cluster_name}/node-resources")
+async def node_resources_endpoint(
+    cluster_name: str,
+    kubeconfig_url: Optional[str] = None,
+    session: dict = Depends(get_session),
+):
+    """Per-worker-node CPU/memory requests vs allocatable, derived from k8s API (no metrics-server needed)."""
+    import time as _time
+    cached = _NODE_RESOURCES_CACHE.get(cluster_name)
+    if cached and _time.monotonic() - cached[1] < _NODE_RESOURCES_TTL:
+        return cached[0]
+
+    if not kubeconfig_url:
+        raise HTTPException(400, "kubeconfig_url required")
+
+    def _fetch():
+        import re as _re
+        from workload_runner import _sync_load_k8s
+        core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
+
+        def _parse_cpu(s: str) -> float:
+            """Return millicores."""
+            if not s: return 0.0
+            if s.endswith('m'): return float(s[:-1])
+            return float(s) * 1000
+
+        def _parse_mem(s: str) -> float:
+            """Return MiB."""
+            if not s: return 0.0
+            if s.endswith('Ki'): return float(s[:-2]) / 1024
+            if s.endswith('Mi'): return float(s[:-2])
+            if s.endswith('Gi'): return float(s[:-2]) * 1024
+            if s.endswith('Ti'): return float(s[:-2]) * 1024 * 1024
+            if s.endswith('k'):  return float(s[:-1]) * 1000 / 1024 / 1024
+            if s.endswith('M'):  return float(s[:-1])
+            return float(s) / 1024 / 1024
+
+        # Get worker nodes
+        nodes = core.list_node(label_selector="node-role.kubernetes.io/worker=").items
+        node_info: dict[str, dict] = {}
+        for n in nodes:
+            alloc = n.status.allocatable or {}
+            node_info[n.metadata.name] = {
+                "name": n.metadata.name,
+                "cpu_alloc_m": _parse_cpu(alloc.get("cpu", "0")),
+                "mem_alloc_mib": _parse_mem(alloc.get("memory", "0")),
+                "pods_max": int(alloc.get("pods", "110")),
+                "cpu_req_m": 0.0,
+                "mem_req_mib": 0.0,
+                "cpu_lim_m": 0.0,
+                "mem_lim_mib": 0.0,
+                "pod_count": 0,
+            }
+
+        # Sum pod requests/limits per node (all namespaces)
+        pods = core.list_pod_for_all_namespaces(
+            field_selector="status.phase=Running"
+        ).items
+        for pod in pods:
+            nn = pod.spec.node_name
+            if nn not in node_info:
+                continue
+            node_info[nn]["pod_count"] += 1
+            for c in (pod.spec.containers or []):
+                if c.resources:
+                    req = c.resources.requests or {}
+                    lim = c.resources.limits  or {}
+                    node_info[nn]["cpu_req_m"]   += _parse_cpu(req.get("cpu", "0"))
+                    node_info[nn]["mem_req_mib"] += _parse_mem(req.get("memory", "0"))
+                    node_info[nn]["cpu_lim_m"]   += _parse_cpu(lim.get("cpu", "0"))
+                    node_info[nn]["mem_lim_mib"] += _parse_mem(lim.get("memory", "0"))
+
+        api_client.close()
+        return {"nodes": [
+            {**v,
+             "cpu_req_m": round(v["cpu_req_m"]),
+             "mem_req_mib": round(v["mem_req_mib"]),
+             "cpu_lim_m": round(v["cpu_lim_m"]),
+             "mem_lim_mib": round(v["mem_lim_mib"]),
+            }
+            for v in sorted(node_info.values(), key=lambda x: x["name"])
+        ]}
+
+    try:
+        loop = asyncio.get_event_loop()
+        result = await asyncio.wait_for(loop.run_in_executor(None, _fetch), timeout=20.0)
+        _NODE_RESOURCES_CACHE[cluster_name] = (result, _time.monotonic())
+        return result
+    except Exception as e:
+        raise HTTPException(502, f"Could not fetch node resources: {e}")
 
 
 @router.get("/{cluster_name}/worker-nodes")

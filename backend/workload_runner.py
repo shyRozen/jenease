@@ -47,6 +47,10 @@ NOOBAA_IMAGE = "registry.access.redhat.com/ubi9/python-311:latest"
 # Shared sync groups: sync_id → {expected, ready, lock, namespaces, kubeconfig_url}
 _SYNC_GROUPS: dict[str, dict] = {}
 
+# Protects load_kube_config_from_dict — that call mutates global k8s state, so
+# concurrent calls from multiple threads produce a race that corrupts some configs.
+_K8S_LOAD_LOCK = threading.Lock()
+
 
 SYNC_POLL_CMD = (
     "echo '[jenease] Waiting for sync signal…' && "
@@ -214,8 +218,9 @@ def _sync_load_k8s(kubeconfig_url: str):
         kube_dict = yaml.safe_load(r.text)
         _KUBECONFIG_CONTENT_CACHE[kubeconfig_url] = (kube_dict, time.time())
 
-    k8s_config.load_kube_config_from_dict(kube_dict)
-    cfg = client.Configuration.get_default_copy()
+    with _K8S_LOAD_LOCK:
+        k8s_config.load_kube_config_from_dict(kube_dict)
+        cfg = client.Configuration.get_default_copy()
 
     for entry in kube_dict.get("clusters", []):
         proxy_url = (entry.get("cluster") or {}).get("proxy-url")
@@ -1031,6 +1036,12 @@ async def create_and_stream_workload(
                     group["ready"] += 1
                     all_ready = group["ready"] >= group["expected"]
                 if all_ready:
+                    with group["lock"]:
+                        if group.get("fired"):
+                            all_ready = False  # backend monitor beat us to it
+                        else:
+                            group["fired"] = True
+                if all_ready:
                     offsets = sorted(set(p[2] for p in group["pods"]))
                     offset_note = ', '.join(f'T+{int(o)}s' for o in offsets if o > 0)
                     msg = "✓ All pods ready — firing sync signal" + (f" (delayed: {offset_note})" if offset_note else "") + "…"
@@ -1130,24 +1141,177 @@ def _sync_signal_start(kubeconfig_url: str, pods: list):
         by_offset[float(offset or 0)].append((ns, pn))
 
     def _fire(delay_secs: float, ns_pod_pairs: list):
+        try:
+            _fire_inner(delay_secs, ns_pod_pairs)
+        except Exception as _top:
+            print(f"[SYNC-SIGNAL] _fire CRASHED: {type(_top).__name__}: {_top}", flush=True)
+            import traceback; traceback.print_exc()
+
+    def _fire_inner(delay_secs: float, ns_pod_pairs: list):
+        print(f"[SYNC-SIGNAL] _fire started for {len(ns_pod_pairs)} pods", flush=True)
         if delay_secs > 0:
             _time.sleep(delay_secs)
         core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
+        print(f"[SYNC-SIGNAL] k8s client ready", flush=True)
         for ns, pn in ns_pod_pairs:
-            try:
-                k8s_stream(
-                    core.connect_get_namespaced_pod_exec,
-                    pn, ns,
-                    command=["touch", "/tmp/jenease-start"],
-                    stderr=True, stdin=False, stdout=True, tty=False,
-                )
-            except Exception:
-                pass
+            success = False
+            for attempt in range(3):
+                try:
+                    k8s_stream(
+                        core.connect_get_namespaced_pod_exec,
+                        pn, ns,
+                        command=["touch", "/tmp/jenease-start"],
+                        stderr=True, stdin=False, stdout=True, tty=False,
+                    )
+                    success = True
+                    break
+                except Exception as _e:
+                    print(f"[SYNC-SIGNAL] touch {pn} attempt {attempt+1}/3 failed: {_e}", flush=True)
+                    if attempt < 2:
+                        _time.sleep(2)
+            print(f"[SYNC-SIGNAL] {pn} → {'✓' if success else '✗ FAILED'}", flush=True)
         api_client.close()
 
     for offset, pairs in sorted(by_offset.items()):
         t = threading.Thread(target=_fire, args=(offset, list(pairs)), daemon=True)
         t.start()
+
+
+async def _backend_sync_monitor(sync_id: str, kubeconfig_url: str, pods: list) -> None:
+    """Safety-net asyncio task for sync groups.
+
+    SSE streams create pods and increment _SYNC_GROUPS[sync_id]["ready"] as each pod
+    reaches Running state. When all pods are accounted for the SSE path fires the signal.
+
+    But browsers cap HTTP/1.1 to ~6 concurrent connections per origin. With health/OSD
+    queries consuming slots, only 4-5 workload SSE streams can open simultaneously.
+    The remaining workloads never get their ready count incremented, so the signal never
+    fires from the SSE path.
+
+    This monitor polls k8s directly — independent of SSE connections — and fires as a
+    fallback. The 'fired' flag + lock ensures only one path (SSE or this monitor) signals."""
+    loop = asyncio.get_event_loop()
+
+    def _watch():
+        import time as _t
+        # Give SSE streams time to open and do it themselves (fast path)
+        _t.sleep(5)
+
+        # If SSE path already fired while we were sleeping, we're done
+        group = _SYNC_GROUPS.get(sync_id)
+        if not group or group.get("fired"):
+            return
+
+        # Poll k8s until all pods have a running container (up to 10 min)
+        with _K8S_LOAD_LOCK:
+            from kubernetes import client as _k8s, config as _k8s_cfg
+            cached = _KUBECONFIG_CONTENT_CACHE.get(kubeconfig_url)
+            if cached and time.time() - cached[1] < _KUBECONFIG_CONTENT_TTL:
+                kube_dict = cached[0]
+            else:
+                import httpx as _httpx
+                r = _httpx.get(kubeconfig_url, timeout=10.0)
+                kube_dict = __import__("yaml").safe_load(r.text)
+                _KUBECONFIG_CONTENT_CACHE[kubeconfig_url] = (kube_dict, time.time())
+            _k8s_cfg.load_kube_config_from_dict(kube_dict)
+            cfg = _k8s.Configuration.get_default_copy()
+        for entry in kube_dict.get("clusters", []):
+            proxy = (entry.get("cluster") or {}).get("proxy-url")
+            if proxy:
+                cfg.proxy = proxy; break
+        api_client = _k8s.ApiClient(cfg)
+        core = _k8s.CoreV1Api(api_client)
+
+        deadline = _t.monotonic() + 600
+        while _t.monotonic() < deadline:
+            # Bail early if SSE path already fired
+            group = _SYNC_GROUPS.get(sync_id)
+            if not group or group.get("fired"):
+                api_client.close()
+                return
+            try:
+                if all(
+                    any(
+                        c.state and c.state.running
+                        for c in (core.read_namespaced_pod(pn, ns).status.container_statuses or [])
+                    )
+                    for ns, pn, _ in pods
+                ):
+                    break
+            except Exception:
+                pass
+            _t.sleep(3)
+
+        api_client.close()
+
+        # All pods running — fire signal if SSE path hasn't already
+        group = _SYNC_GROUPS.get(sync_id)
+        if group:
+            with group["lock"]:
+                if group.get("fired"):
+                    return
+                group["fired"] = True
+            _sync_signal_start(kubeconfig_url, group["pods"])
+            _SYNC_GROUPS.pop(sync_id, None)
+
+    await loop.run_in_executor(None, _watch)
+
+
+async def _backend_sync_orchestrate(
+    kubeconfig_url: str,
+    wl_specs: list,
+    wl_ids: list,
+    pods_with_offsets: list,
+    pending_params: dict,   # _PENDING_PARAMS from routers/workloads.py (passed by ref)
+) -> None:
+    """Backend-driven sync: create ALL resources in parallel then poll + signal.
+
+    Runs as an asyncio task — completely independent of frontend SSE connections.
+    This solves the browser HTTP/1.1 limit (6 connections per origin) that caused
+    sync groups >5 to hang forever because not all log-stream SSEs could open."""
+    loop = asyncio.get_event_loop()
+
+    # Create k8s resources sequentially — eliminates all threading races on global
+    # k8s config state. Each spec: namespace + RBAC + PVC/OBC + pod (~1s per workload).
+    import functools as _functools
+    n = len(wl_specs)
+    print(f"[SYNC-ORCH] starting — {n} pods to create sequentially", flush=True)
+    for i, spec in enumerate(wl_specs):
+        try:
+            await loop.run_in_executor(
+                None, _functools.partial(_sync_create_resources_only, **spec)
+            )
+            print(f"[SYNC-ORCH] created {i+1}/{n}: {spec.get('pod_name')}", flush=True)
+        except Exception as e:
+            print(f"[SYNC-ORCH] ERROR {i+1}/{n}: {e}", flush=True)
+
+    for wl_id in wl_ids:
+        pending_params.pop(wl_id, None)
+    print(f"[SYNC-ORCH] all created — polling for Running", flush=True)
+
+    def _poll():
+        import time as _t
+        core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
+        deadline = _t.monotonic() + 600
+        while _t.monotonic() < deadline:
+            statuses = []
+            for ns, pn, _ in pods_with_offsets:
+                try:
+                    cs = core.read_namespaced_pod(pn, ns).status.container_statuses or []
+                    statuses.append(any(c.state and c.state.running for c in cs))
+                except Exception:
+                    statuses.append(False)
+            ready = sum(statuses)
+            print(f"[SYNC-ORCH] {ready}/{len(statuses)} Running", flush=True)
+            if ready == len(statuses):
+                break
+            _t.sleep(3)
+        api_client.close()
+
+    await loop.run_in_executor(None, _poll)
+    print(f"[SYNC-ORCH] firing signal for {n} pods", flush=True)
+    _sync_signal_start(kubeconfig_url, pods_with_offsets)
+    print(f"[SYNC-ORCH] done", flush=True)
 
 
 def _sync_create_resources_only(

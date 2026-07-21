@@ -30,6 +30,13 @@ interface CephCapacity {
   health: string
 }
 
+interface NodeResource {
+  name: string
+  cpu_alloc_m: number; cpu_req_m: number; cpu_lim_m: number
+  mem_alloc_mib: number; mem_req_mib: number; mem_lim_mib: number
+  pod_count: number; pods_max: number
+}
+
 interface HealthData {
   status: string
   degraded_reason?: string | null
@@ -462,6 +469,14 @@ export default function ClusterDetail() {
     return () => es.close()
   }, [name, isClusterActive, kubeconfigUrl])
 
+  const { data: nodeResources } = useQuery<{ nodes: NodeResource[] }>({
+    queryKey: ['node-resources', name, kubeconfigUrl],
+    queryFn: () => api.get(`/clusters/${name}/node-resources?kubeconfig_url=${encodeURIComponent(kubeconfigUrl ?? '')}`),
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+    enabled: isClusterActive && !!kubeconfigUrl,
+  })
+
   const podGroups = groupPods(details?.pods ?? [])
   const masters = health?.nodes?.filter(n => n.role === 'master') ?? []
   const workers = health?.nodes?.filter(n => n.role !== 'master') ?? []
@@ -701,6 +716,69 @@ export default function ClusterDetail() {
                 </div>
               )}
             </div>
+          </div>
+        </section>
+      )}
+
+      {/* Node Resources */}
+      {(nodeResources?.nodes?.length ?? 0) > 0 && (
+        <section>
+          <h2 className="text-xs font-mono text-text-muted uppercase tracking-widest mb-3">Node Resources</h2>
+          <div className="card p-4 space-y-3">
+            {nodeResources!.nodes!.map(n => {
+              const cpuPct  = n.cpu_alloc_m  > 0 ? Math.min((n.cpu_req_m  / n.cpu_alloc_m)  * 100, 100) : 0
+              const memPct  = n.mem_alloc_mib > 0 ? Math.min((n.mem_req_mib / n.mem_alloc_mib) * 100, 100) : 0
+              const podPct  = n.pods_max > 0 ? Math.min((n.pod_count / n.pods_max) * 100, 100) : 0
+              const cpuColor = cpuPct > 90 ? 'bg-accent-red' : cpuPct > 75 ? 'bg-accent-amber' : 'bg-accent-cyan'
+              const memColor = memPct > 90 ? 'bg-accent-red' : memPct > 75 ? 'bg-accent-amber' : 'bg-accent-green'
+              const fmtMib = (mib: number) => mib >= 1024 ? `${(mib/1024).toFixed(1)}G` : `${Math.round(mib)}M`
+              const fmtCpu = (m: number) => m >= 1000 ? `${(m/1000).toFixed(1)}` : `${Math.round(m)}m`
+              return (
+                <div key={n.name} className="grid items-center gap-x-3 gap-y-1.5"
+                  style={{ gridTemplateColumns: '7rem 1fr' }}>
+                  {/* Node name */}
+                  <span className="text-[10px] font-mono text-text-secondary font-semibold row-span-3 self-center truncate" title={n.name}>
+                    {n.name.replace(/\..+/, '')}
+                  </span>
+                  {/* CPU bar */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[9px] font-mono text-text-muted w-6">CPU</span>
+                    <div className="flex-1 h-3 bg-surface-3 rounded-full overflow-hidden relative">
+                      <div className={`h-full rounded-full transition-all ${cpuColor}`} style={{ width: `${cpuPct}%` }} />
+                    </div>
+                    <span className="text-[9px] font-mono text-text-muted w-28 shrink-0">
+                      {fmtCpu(n.cpu_req_m)} / {fmtCpu(n.cpu_alloc_m)} cores
+                      <span className={`ml-1 font-semibold ${cpuPct > 90 ? 'text-accent-red' : cpuPct > 75 ? 'text-accent-amber' : 'text-text-muted'}`}>
+                        {cpuPct.toFixed(0)}%
+                      </span>
+                    </span>
+                  </div>
+                  {/* Memory bar */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[9px] font-mono text-text-muted w-6">MEM</span>
+                    <div className="flex-1 h-3 bg-surface-3 rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full transition-all ${memColor}`} style={{ width: `${memPct}%` }} />
+                    </div>
+                    <span className="text-[9px] font-mono text-text-muted w-28 shrink-0">
+                      {fmtMib(n.mem_req_mib)} / {fmtMib(n.mem_alloc_mib)}
+                      <span className={`ml-1 font-semibold ${memPct > 90 ? 'text-accent-red' : memPct > 75 ? 'text-accent-amber' : 'text-text-muted'}`}>
+                        {memPct.toFixed(0)}%
+                      </span>
+                    </span>
+                  </div>
+                  {/* Pods bar */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[9px] font-mono text-text-muted w-6">POD</span>
+                    <div className="flex-1 h-3 bg-surface-3 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full bg-surface-4 transition-all" style={{ width: `${podPct}%` }} />
+                    </div>
+                    <span className="text-[9px] font-mono text-text-muted w-28 shrink-0">
+                      {n.pod_count} / {n.pods_max} pods
+                    </span>
+                  </div>
+                </div>
+              )
+            })}
           </div>
         </section>
       )}

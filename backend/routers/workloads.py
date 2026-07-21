@@ -4,7 +4,7 @@ import re
 import time
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlmodel import Session, select
 from sse_starlette.sse import EventSourceResponse
@@ -212,8 +212,8 @@ async def sync_launch(
     session: dict = Depends(get_session),
 ):
     """Launch multiple workloads with synchronized IO start — all pods created first, then IO fires simultaneously."""
-    from workload_runner import _SYNC_GROUPS
-    import uuid as _uuid, threading as _threading
+    from workload_runner import _backend_sync_orchestrate
+    import uuid as _uuid
 
     username = session["username"]
     if not cluster_name.lower().startswith(username.lower()):
@@ -258,20 +258,20 @@ async def sync_launch(
                 "workers": item.workers, "engine": item.engine, "direct": item.direct,
                 "node_name": item.node_name or "",
                 "synced": True, "sync_id": sync_id,
+                "_backend_owned": True,  # backend orchestrator creates the pod; SSE observes only
             }
             workload_ids.append(w.id)
             pods.append((namespace, pod_name, float(item.offset_sec or 0)))
         db.commit()
 
-    # Register sync group — each pod's log stream increments ready count;
-    # when all are ready, _sync_signal_start fires each offset group.
-    _SYNC_GROUPS[sync_id] = {
-        "expected": len(body.workloads),
-        "ready":    0,
-        "lock":     _threading.Lock(),
-        "pods":     pods,
-        "kubeconfig_url": kubeconfig_url,
-    }
+    # Snapshot specs now (before _PENDING_PARAMS is cleared by the orchestrator)
+    wl_specs = [{**_PENDING_PARAMS[wl_id]} for wl_id in workload_ids]
+
+    # Backend orchestrator: creates ALL pods sequentially, polls until all Running,
+    # then fires the signal. Independent of SSE connections — fixes the browser
+    # HTTP/1.1 limit (~6 connections/origin) that left queued workloads uncreated.
+    import asyncio as _asyncio
+    _asyncio.create_task(_backend_sync_orchestrate(kubeconfig_url, wl_specs, workload_ids, pods, _PENDING_PARAMS))
 
     # Record all workload events in the session (all at offset 0 — sync fires simultaneously)
     if body.session_id:
@@ -478,6 +478,73 @@ async def purge_orphaned(
     return {"purged": results}
 
 
+@router.get("/{cluster_name}/workloads/logs/multi")
+async def multiplexed_workload_logs(
+    cluster_name: str,
+    request: Request,
+    ids: str = "",
+    session: dict = Depends(get_session),
+):
+    """Single SSE stream for multiple workloads — bypasses browser HTTP/1.1 connection limit."""
+    import asyncio as _asyncio
+    from workload_runner import stream_pod_logs
+    username = session["username"]
+
+    workload_ids: list[int] = []
+    for x in ids.split(","):
+        try: workload_ids.append(int(x.strip()))
+        except: pass
+
+    async def generate():
+        queue: _asyncio.Queue = _asyncio.Queue()
+        tasks: list = []
+
+        for wl_id in workload_ids:
+            with Session(engine) as db:
+                workload = db.get(Workload, wl_id)
+            if not workload or workload.username != username or workload.cluster_name != cluster_name:
+                continue
+
+            size_bytes = workload.size_gb * 1024 * 1024 * 1024
+            _p = _PENDING_PARAMS.get(wl_id)
+            backend_owned = bool(_p and _p.get("_backend_owned"))
+            params = None if backend_owned else _PENDING_PARAMS.pop(wl_id, None)
+
+            async def _stream(wl_id=wl_id, workload=workload, params=params,
+                              size_bytes=size_bytes, backend_owned=backend_owned):
+                fio_state: dict = {}
+                try:
+                    if params:
+                        async for item in create_and_stream_workload(**params):
+                            await queue.put({"workload_id": wl_id, **item})
+                    else:
+                        first = "[jenease] ⚡ Sync — backend creating pod…" if backend_owned \
+                                else "[jenease] Connecting to cluster…"
+                        await queue.put({"workload_id": wl_id, "line": first})
+                        async for line in stream_pod_logs(workload.kubeconfig_url, workload.namespace, workload.pod_name):
+                            await queue.put({"workload_id": wl_id,
+                                             **parse_fio_line(line, size_bytes=size_bytes, fio_state=fio_state)})
+                except Exception:
+                    pass
+
+            tasks.append(_asyncio.create_task(_stream()))
+
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    item = await _asyncio.wait_for(queue.get(), timeout=5.0)
+                    yield {"data": json.dumps(item)}
+                except _asyncio.TimeoutError:
+                    pass
+        finally:
+            for t in tasks:
+                t.cancel()
+
+    return EventSourceResponse(generate(), headers={"Content-Encoding": "identity"})
+
+
 @router.get("/{cluster_name}/workloads/{workload_id}/logs")
 async def stream_logs(
     cluster_name: str,
@@ -490,19 +557,28 @@ async def stream_logs(
         if not workload or workload.username != username or workload.cluster_name != cluster_name:
             raise HTTPException(404, "Workload not found")
 
-    params = _PENDING_PARAMS.pop(workload_id, None)
+    # Backend-owned workloads are created by the orchestrator — SSE just observes.
+    # Don't pop _PENDING_PARAMS; the orchestrator does that after creating the pod.
+    _p = _PENDING_PARAMS.get(workload_id)
+    backend_owned = bool(_p and _p.get("_backend_owned"))
+    params = None if backend_owned else _PENDING_PARAMS.pop(workload_id, None)
 
     async def generate():
         size_bytes = workload.size_gb * 1024 * 1024 * 1024
         fio_state: dict = {}
         from workload_runner import stream_pod_logs
         if params:
-            # Full creation with per-step status messages (synced=True adds sync CM + poll script)
+            # Regular workload: SSE drives creation with per-step status messages
             async for item in create_and_stream_workload(**params):
                 yield {"data": json.dumps(item)}
         else:
-            # Pod already exists (page reload) — just stream existing logs
-            yield {"data": json.dumps({"line": "[jenease] Connecting to cluster…"})}
+            # Backend-owned or page reload: wait for pod and stream its logs.
+            # stream_pod_logs retries every 2s for up to 10 min — handles the window
+            # while the orchestrator is still creating the pod.
+            if backend_owned:
+                yield {"data": json.dumps({"line": "[jenease] ⚡ Sync — backend creating pod…"})}
+            else:
+                yield {"data": json.dumps({"line": "[jenease] Connecting to cluster…"})}
             async for line in stream_pod_logs(workload.kubeconfig_url, workload.namespace, workload.pod_name):
                 yield {"data": json.dumps(parse_fio_line(line, size_bytes=size_bytes, fio_state=fio_state))}
 

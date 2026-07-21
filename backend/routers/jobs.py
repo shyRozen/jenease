@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 _catalog: list[dict] = []
 _catalog_ts: float = 0.0
 CACHE_TTL = 3600        # in-memory refresh interval (1h)
-DISK_CACHE_TTL = 28800  # disk cache valid for 8h — survives restarts across a workday
+DISK_CACHE_TTL = 86400  # disk cache valid for 24h — survives restarts across a full day
 
 # Persist catalog to disk so container restarts don't require a full rebuild
 _CATALOG_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "catalog.json")

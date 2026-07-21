@@ -124,8 +124,15 @@ class JenkinsClient:
                 f"{self.base}/api/json",
                 params={"tree": "jobs[name,url,description,_class]"},
             )
-            r.raise_for_status()
-            return r.json().get("jobs", [])
+        if r.status_code in (401, 403):
+            # SSO-only Jenkins rejects Basic Auth — retry anonymously
+            async with httpx.AsyncClient(timeout=30, verify=False) as c:
+                r = await c.get(
+                    f"{self.base}/api/json",
+                    params={"tree": "jobs[name,url,description,_class]"},
+                )
+        r.raise_for_status()
+        return r.json().get("jobs", [])
 
     @staticmethod
     def parse_build_description(description: str) -> dict:

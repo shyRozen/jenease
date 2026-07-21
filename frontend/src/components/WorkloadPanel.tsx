@@ -260,13 +260,16 @@ export default function WorkloadPanel({
   const [workers,    setWorkers]    = useState(8)
   const [launching, setLaunching] = useState(false)
   const [launchError, setLaunchError] = useState('')
+  const [launchCount, setLaunchCount] = useState(1)
+  const [launchSync,  setLaunchSync]  = useState(true)  // default ON
 
   // Node pin state
   const [nodeName, setNodeName] = useState<string>('')
 
   // ── Sequence state ──────────────────────────────────────────────────────
   interface SeqItem {
-    id: number; offset_sec: number; workload_type: string; size_gb: number
+    id: number; offset_sec: number; count: number
+    workload_type: string; size_gb: number
     mode: string; pattern: string; block_size: string; num_jobs: number
     iodepth: number; duration_sec: number; obj_size_mb: number; workers: number
     engine: string; direct: boolean; node_name?: string
@@ -274,7 +277,7 @@ export default function WorkloadPanel({
   const [seqItems,    setSeqItems]    = useState<SeqItem[]>([])
   const [seqName,     setSeqName]     = useState('')
   const [seqRecord,   setSeqRecord]   = useState(false)
-  const [seqSync,     setSeqSync]     = useState(false)
+  const [seqSync,     setSeqSync]     = useState(true)  // default ON — all pods ready before any starts IO
   const [seqRunning,  setSeqRunning]  = useState(false)
   const [seqCounter,  setSeqCounter]  = useState(0)   // local id generator
   const [showAllSeqs, setShowAllSeqs] = useState(false)
@@ -428,23 +431,22 @@ export default function WorkloadPanel({
     setLaunching(true)
     setLaunchError('')
     try {
-      await api.post(`/clusters/${clusterName}/workloads`, {
-        workload_type: type,
-        size_gb: size,
-        mode,
-        pattern,
-        block_size: blockSize,
-        num_jobs: numJobs,
-        iodepth,
-        duration_sec: duration,
-        obj_size_mb: objSizeMb,
-        workers,
-        engine,
-        direct,
-        node_name: nodeName,
-        session_id: recordingId,
-        kubeconfig_url: kubeconfigUrl,
-      })
+      const params = {
+        workload_type: type, size_gb: size, mode, pattern, block_size: blockSize,
+        num_jobs: numJobs, iodepth, duration_sec: duration, obj_size_mb: objSizeMb,
+        workers, engine, direct, node_name: nodeName, offset_sec: 0,
+      }
+      if (launchSync || launchCount > 1) {
+        // Sync-launch: all pods come up first, then IO fires together
+        const workloads = Array.from({ length: launchCount }, () => ({ ...params }))
+        await api.post(`/clusters/${clusterName}/workloads/sync-launch`, {
+          workloads, session_id: recordingId, kubeconfig_url: kubeconfigUrl,
+        })
+      } else {
+        await api.post(`/clusters/${clusterName}/workloads`, {
+          ...params, session_id: recordingId, kubeconfig_url: kubeconfigUrl,
+        })
+      }
       await refetch()
     } catch (e: any) {
       setLaunchError((e as Error).message)
@@ -570,7 +572,7 @@ export default function WorkloadPanel({
   function captureCurrentParams() {
     return { workload_type: type, size_gb: size, mode, pattern, block_size: blockSize,
       num_jobs: numJobs, iodepth, duration_sec: duration, obj_size_mb: objSizeMb,
-      workers, engine, direct, node_name: nodeName }
+      workers, engine, direct, node_name: nodeName, count: launchCount }
   }
 
   function handleAddToSequence() {
@@ -598,20 +600,25 @@ export default function WorkloadPanel({
     }
 
     if (seqSync) {
-      // Synchronized mode — create all pods first, then fire IO simultaneously
+      // Sync mode: all pods come up together, offsets fire after all-ready
       try {
+        const workloads = seqItems.flatMap(({ id: _id, count, ...rest }) =>
+          Array.from({ length: count ?? 1 }, () => ({ ...rest }))
+        )
         await api.post(`/clusters/${clusterName}/workloads/sync-launch`, {
-          workloads: seqItems.map(({ id: _id, ...rest }) => rest),
-          session_id: sessionId,
-          kubeconfig_url: kubeconfigUrl,
+          workloads, session_id: sessionId, kubeconfig_url: kubeconfigUrl,
         })
         await refetch()
       } catch (e: any) {
         console.error('[sequence sync] failed:', e?.message)
       }
     } else {
+      // Non-sync: staggered creation at each item's offset (legacy behaviour)
       const t0 = Date.now()
-      for (const item of [...seqItems].sort((a, b) => a.offset_sec - b.offset_sec)) {
+      const expanded = seqItems.flatMap(item =>
+        Array.from({ length: item.count ?? 1 }, () => item)
+      )
+      for (const item of [...expanded].sort((a, b) => a.offset_sec - b.offset_sec)) {
         const delay = item.offset_sec * 1000 - (Date.now() - t0)
         await new Promise(r => setTimeout(r, Math.max(0, delay)))
         api.post(`/clusters/${clusterName}/workloads`, { ...item, node_name: item.node_name ?? '', session_id: sessionId, kubeconfig_url: kubeconfigUrl })
@@ -872,6 +879,34 @@ export default function WorkloadPanel({
           </div>
         </>)}
 
+        {/* Copies + Sync */}
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[9px] font-mono text-text-muted uppercase tracking-wider">Copies</span>
+              <input
+                type="number" min={1} max={32} value={launchCount}
+                list="launch-count-opts"
+                onChange={e => setLaunchCount(Math.max(1, Number(e.target.value) || 1))}
+                className="w-12 text-[10px] font-mono bg-surface-3 border border-surface-4 rounded px-1 py-0.5 text-accent-cyan outline-none text-center"
+              />
+              <datalist id="launch-count-opts">
+                {[1,2,4,8,16].map(n => <option key={n} value={n} />)}
+              </datalist>
+            </div>
+            <label className="flex items-center gap-1.5 cursor-pointer">
+              <input type="checkbox" checked={launchSync} onChange={e => setLaunchSync(e.target.checked)}
+                className="accent-accent-cyan" />
+              <span className="text-[9px] font-mono text-text-muted">⚡ Sync start</span>
+            </label>
+          </div>
+          {!launchSync && (
+            <p className="text-[9px] font-mono text-accent-amber/80">
+              ⚠ Without sync, pods start as soon as they are individually ready — not coordinated with others.
+            </p>
+          )}
+        </div>
+
         {launchError && (
           <p className="text-[10px] font-mono text-accent-red">{launchError}</p>
         )}
@@ -886,7 +921,7 @@ export default function WorkloadPanel({
               <span className="w-3 h-3 border-2 border-accent-cyan/30 border-t-accent-cyan rounded-full animate-spin" />
               Launching…
             </span>
-          ) : '▶ Launch Workload'}
+          ) : launchCount > 1 ? `▶ Launch ${launchCount}× ${type.toUpperCase()}` : '▶ Launch Workload'}
         </button>
 
         {/* Add to Sequence */}
@@ -903,14 +938,23 @@ export default function WorkloadPanel({
 
           <div className="space-y-1">
             {[...seqItems].sort((a, b) => a.offset_sec - b.offset_sec).map(item => (
-              <div key={item.id} className="flex items-center gap-2">
+              <div key={item.id} className="flex items-center gap-1.5">
                 <span className="text-[9px] font-mono text-text-muted">T+</span>
                 <input
                   type="number" min={0} value={item.offset_sec}
                   onChange={e => setSeqItems(prev => prev.map(i => i.id === item.id ? { ...i, offset_sec: Math.max(0, Number(e.target.value)) } : i))}
                   className="w-12 text-[10px] font-mono bg-surface-3 border border-surface-4 rounded px-1 py-0.5 text-accent-amber outline-none text-center"
                 />
-                <span className="text-[9px] font-mono text-text-muted">s</span>
+                <span className="text-[9px] font-mono text-text-muted">s ×</span>
+                <input
+                  type="number" min={1} max={32} value={item.count ?? 1}
+                  list={`count-opts-${item.id}`}
+                  onChange={e => setSeqItems(prev => prev.map(i => i.id === item.id ? { ...i, count: Math.max(1, Number(e.target.value) || 1) } : i))}
+                  className="w-10 text-[10px] font-mono bg-surface-3 border border-surface-4 rounded px-1 py-0.5 text-accent-cyan outline-none text-center"
+                />
+                <datalist id={`count-opts-${item.id}`}>
+                  {[1,2,4,8,16].map(n => <option key={n} value={n} />)}
+                </datalist>
                 <span className="text-[10px] font-mono text-text-secondary flex-1 truncate">{seqItemLabel(item)}</span>
                 <button onClick={() => setSeqItems(prev => prev.filter(i => i.id !== item.id))}
                   className="text-text-muted hover:text-accent-red transition-colors shrink-0">
@@ -932,11 +976,18 @@ export default function WorkloadPanel({
             <span className="text-[10px] font-mono text-text-muted">Start recording with sequence</span>
           </label>
 
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" checked={seqSync} onChange={e => setSeqSync(e.target.checked)}
-              className="accent-accent-cyan" />
-            <span className="text-[10px] font-mono text-text-muted">⚡ Sync IO start — create all pods first, then fire simultaneously</span>
-          </label>
+          <div className="space-y-1">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={seqSync} onChange={e => setSeqSync(e.target.checked)}
+                className="accent-accent-cyan" />
+              <span className="text-[10px] font-mono text-text-muted">⚡ Sync start — all pods ready before any IO begins</span>
+            </label>
+            {!seqSync && (
+              <p className="text-[9px] font-mono text-accent-amber/80 pl-5">
+                ⚠ Without sync, pods are created at staggered times. On platforms with slow control-plane provisioning under load (vSphere, busy cloud), PVC and pod creation may take significantly longer.
+              </p>
+            )}
+          </div>
 
           <div className="flex gap-1.5">
             <button onClick={handleRunSequence} disabled={seqRunning}

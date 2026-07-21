@@ -99,7 +99,7 @@ class SyncLaunchItem(BaseModel):
     engine: str = "libaio"
     direct: bool = True
     node_name: Optional[str] = None
-    offset_sec: float = 0  # kept for compatibility, ignored in sync mode
+    offset_sec: float = 0  # delay after all pods ready before this pod gets the start signal
 
 class SyncLaunchRequest(BaseModel):
     workloads: list[SyncLaunchItem]
@@ -229,10 +229,9 @@ async def sync_launch(
         if not kubeconfig_url:
             raise HTTPException(404, "Kubeconfig not found for this cluster")
 
-    sync_id    = _uuid.uuid4().hex[:8]
+    sync_id      = _uuid.uuid4().hex[:8]
     workload_ids = []
-    namespaces   = []
-    pod_names    = []
+    pods         = []   # (namespace, pod_name, offset_sec)
 
     with Session(engine) as db:
         for item in body.workloads:
@@ -261,17 +260,16 @@ async def sync_launch(
                 "synced": True, "sync_id": sync_id,
             }
             workload_ids.append(w.id)
-            namespaces.append(namespace)
-            pod_names.append(pod_name)
+            pods.append((namespace, pod_name, float(item.offset_sec or 0)))
         db.commit()
 
-    # Register sync group — log streams signal when each pod is Running
+    # Register sync group — each pod's log stream increments ready count;
+    # when all are ready, _sync_signal_start fires each offset group.
     _SYNC_GROUPS[sync_id] = {
-        "expected":   len(body.workloads),
-        "ready":      0,
-        "lock":       _threading.Lock(),
-        "namespaces": namespaces,
-        "pod_names":  pod_names,
+        "expected": len(body.workloads),
+        "ready":    0,
+        "lock":     _threading.Lock(),
+        "pods":     pods,
         "kubeconfig_url": kubeconfig_url,
     }
 

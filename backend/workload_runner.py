@@ -1031,8 +1031,11 @@ async def create_and_stream_workload(
                     group["ready"] += 1
                     all_ready = group["ready"] >= group["expected"]
                 if all_ready:
-                    emit("[jenease] ✓ All pods running — firing sync signal…")
-                    _sync_signal_start(kubeconfig_url, group["namespaces"], group["pod_names"])
+                    offsets = sorted(set(p[2] for p in group["pods"]))
+                    offset_note = ', '.join(f'T+{int(o)}s' for o in offsets if o > 0)
+                    msg = "✓ All pods ready — firing sync signal" + (f" (delayed: {offset_note})" if offset_note else "") + "…"
+                    emit(f"[jenease] {msg}")
+                    _sync_signal_start(kubeconfig_url, group["pods"])
                     _SYNC_GROUPS.pop(sync_id, None)
                 else:
                     remaining = group["expected"] - group["ready"]
@@ -1112,21 +1115,39 @@ def _sync_setup_sync_configmap(core, rbac, client, namespace: str):
         pass
 
 
-def _sync_signal_start(kubeconfig_url: str, namespaces: list[str], pod_names: list[str]):
-    """Touch /tmp/jenease-start inside each pod — pods are waiting for this file."""
+def _sync_signal_start(kubeconfig_url: str, pods: list):
+    """Touch /tmp/jenease-start in each pod at its offset after all-ready.
+
+    pods: list of (namespace, pod_name, offset_sec).
+    Groups by offset_sec and spawns one daemon thread per unique offset.
+    Offset=0 pods get the signal immediately; T>0 pods wait their delay."""
     from kubernetes.stream import stream as k8s_stream
-    core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
-    for ns, pn in zip(namespaces, pod_names):
-        try:
-            k8s_stream(
-                core.connect_get_namespaced_pod_exec,
-                pn, ns,
-                command=["touch", "/tmp/jenease-start"],
-                stderr=True, stdin=False, stdout=True, tty=False,
-            )
-        except Exception:
-            pass
-    api_client.close()
+    from collections import defaultdict
+    import time as _time
+
+    by_offset: dict = defaultdict(list)
+    for ns, pn, offset in pods:
+        by_offset[float(offset or 0)].append((ns, pn))
+
+    def _fire(delay_secs: float, ns_pod_pairs: list):
+        if delay_secs > 0:
+            _time.sleep(delay_secs)
+        core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
+        for ns, pn in ns_pod_pairs:
+            try:
+                k8s_stream(
+                    core.connect_get_namespaced_pod_exec,
+                    pn, ns,
+                    command=["touch", "/tmp/jenease-start"],
+                    stderr=True, stdin=False, stdout=True, tty=False,
+                )
+            except Exception:
+                pass
+        api_client.close()
+
+    for offset, pairs in sorted(by_offset.items()):
+        t = threading.Thread(target=_fire, args=(offset, list(pairs)), daemon=True)
+        t.start()
 
 
 def _sync_create_resources_only(

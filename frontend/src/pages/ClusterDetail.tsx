@@ -628,8 +628,8 @@ export default function ClusterDetail() {
                   />
                 ) : null}
 
-                {/* OSD throughput section with mode toggle */}
-                {Object.keys(osdHistoryRef.current).length > 0 && (
+                {/* OSD throughput section — visible as soon as cluster is active + kubeconfig ready */}
+                {isClusterActive && kubeconfigUrl && (
                   <div className="space-y-2">
                     {/* Section header + toggle */}
                     <div className="flex items-center justify-between">
@@ -641,6 +641,9 @@ export default function ClusterDetail() {
                             {' '}W <span className="text-[#50fa7b]">{cephAgg.w.toFixed(1)}</span>
                             {' '}MB/s total
                           </span>
+                        )}
+                        {Object.keys(osdHistoryRef.current).length === 0 && (
+                          <span className="text-[9px] font-mono text-text-muted animate-pulse">Connecting…</span>
                         )}
                       </div>
                       <div className="flex gap-1">
@@ -664,7 +667,7 @@ export default function ClusterDetail() {
                     </div>
 
                     {/* Per OSD mode: per-OSD R/W charts, 3 per row, shared Y-axis max */}
-                    {osdMode === 'osd' && (() => {
+                    {osdMode === 'osd' && Object.keys(osdHistoryRef.current).length > 0 && (() => {
                       const GAP = 8, COLS = 3
                       const cw = osdGridWidth > 0
                         ? Math.floor((osdGridWidth - GAP * (COLS - 1)) / COLS)
@@ -707,7 +710,7 @@ export default function ClusterDetail() {
                     })()}
 
                     {/* By Pool mode: RBD / CephFS / NooBaa from Prometheus pool metrics */}
-                    {osdMode === 'pool' && (
+                    {osdMode === 'pool' && poolHistoryRef.current.length > 0 && (
                       <ThroughputChart
                         data={poolHistoryRef.current}
                         title="Pool Throughput"

@@ -1435,7 +1435,12 @@ export default function WorkloadPanel({
                 <div className="flex-1 min-w-0">
                   <p className="text-[10px] font-mono text-text-primary truncate">{s.name}</p>
                   <p className="text-[9px] font-mono text-text-muted">
-                    {s.items.length} steps{showAllSeqs ? ` · ${s.username}` : ''}
+                    {(() => {
+                      const total = s.items.reduce((acc: number, i: any) => acc + (i.count ?? 1), 0)
+                      const steps = s.items.length
+                      const wlPart = total !== steps ? ` · ${total} workloads` : ''
+                      return `${steps} step${steps !== 1 ? 's' : ''}${wlPart}${showAllSeqs ? ` · ${s.username}` : ''}`
+                    })()}
                   </p>
                 </div>
                 <button onClick={() => loadSavedSeq(s)} title="Load into editor"

@@ -28,6 +28,8 @@ class SequenceItem(BaseModel):
     workers: int = 8
     engine: str = "libaio"
     direct: bool = True
+    count: int = 1
+    node_name: Optional[str] = None
 
 
 class CreateSequenceRequest(BaseModel):

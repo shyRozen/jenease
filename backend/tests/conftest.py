@@ -43,8 +43,30 @@ async def client():
 
 @pytest_asyncio.fixture
 async def authed_client():
-    """Test client with a valid session cookie pre-injected."""
+    """Test client with a valid session cookie pre-injected (fake token — no Jenkins calls)."""
     cookie = make_session_cookie()
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        cookies={COOKIE_NAME: cookie},
+    ) as c:
+        yield c
+
+
+needs_jenkins = pytest.mark.skipif(
+    not os.environ.get("JENKINS_TEST_TOKEN"),
+    reason="set JENKINS_TEST_TOKEN and JENKINS_TEST_USER to run Jenkins integration tests",
+)
+
+
+@pytest_asyncio.fixture
+async def jenkins_client():
+    """Test client with REAL Jenkins credentials — hits actual Jenkins API.
+    Skip any test using this fixture if JENKINS_TEST_TOKEN is not set.
+    """
+    if not TEST_TOKEN:
+        pytest.skip("JENKINS_TEST_TOKEN not set")
+    cookie = make_session_cookie(username=TEST_USERNAME, token=TEST_TOKEN)
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",

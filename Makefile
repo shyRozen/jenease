@@ -13,3 +13,7 @@ test-backend:
 
 test-frontend:
 	cd frontend && npm test
+
+test-jenkins:
+	JENKINS_TEST_USER=srozen JENKINS_TEST_TOKEN=$(JENKINS_TEST_TOKEN) \
+	  cd backend && python -m pytest tests/test_api_jenkins.py -v

@@ -94,21 +94,39 @@ class JenkinsClient:
                 return prop["parameterDefinitions"]
         return []
 
+    async def _get_crumb(self) -> dict:
+        """Fetch Jenkins CSRF crumb. Returns header dict or {} if crumb not required."""
+        try:
+            async with self._client() as c:
+                r = await c.get(f"{self.base}/crumbIssuer/api/json")
+            if r.status_code == 200:
+                data = r.json()
+                return {data["crumbRequestField"]: data["crumb"]}
+        except Exception:
+            pass
+        return {}
+
     async def trigger_job(self, job: str, params: dict) -> int:
+        crumb = await self._get_crumb()
         async with self._client() as c:
             r = await c.post(
                 f"{self.base}/job/{job}/buildWithParameters",
                 data=params,
+                headers=crumb,
             )
-            r.raise_for_status()
-            # Jenkins returns queue item URL in Location header
-            location = r.headers.get("Location", "")
-            match = re.search(r"/queue/item/(\d+)/", location)
-            return int(match.group(1)) if match else 0
+        r.raise_for_status()
+        # Jenkins returns queue item URL in Location header
+        location = r.headers.get("Location", "")
+        match = re.search(r"/queue/item/(\d+)/", location)
+        return int(match.group(1)) if match else 0
 
     async def abort_build(self, job: str, build_num: int) -> None:
+        crumb = await self._get_crumb()
         async with self._client() as c:
-            r = await c.post(f"{self.base}/job/{job}/{build_num}/stop")
+            r = await c.post(
+                f"{self.base}/job/{job}/{build_num}/stop",
+                headers=crumb,
+            )
             r.raise_for_status()
 
     async def list_agents(self) -> list[dict]:

@@ -370,7 +370,7 @@ function JobListRow({ job, onModify }: { job: DeployJob; onModify: (name: string
       setToast('✓')
       setTimeout(() => setToast(''), 3000)
     } catch (e: any) {
-      setToast('✕')
+      setToast(`✕ ${e.message ?? 'failed'}`)
     } finally {
       setBuilding(false)
     }
@@ -414,7 +414,7 @@ function JobListRow({ job, onModify }: { job: DeployJob; onModify: (name: string
       </td>
       <td className="py-2 px-2">
         <div className="flex gap-1 items-center">
-          {toast && <span className={`text-[9px] ${toast === '✓' ? 'text-accent-green' : 'text-accent-red'}`}>{toast}</span>}
+          {toast && <span className={`text-[9px] max-w-[200px] truncate ${toast.startsWith('✓') ? 'text-accent-green' : 'text-accent-red'}`} title={toast}>{toast}</span>}
           <button onClick={build} disabled={building || !clusterName}
             className="btn-primary text-[10px] py-1 px-2">{building ? '…' : '▶ Build'}</button>
           <button onClick={() => onModify(clusterName)} className="btn-ghost text-[10px] py-1 px-1.5">⚙</button>

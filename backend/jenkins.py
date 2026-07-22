@@ -94,57 +94,42 @@ class JenkinsClient:
                 return prop["parameterDefinitions"]
         return []
 
-    async def _get_crumb(self) -> dict:
-        """Fetch Jenkins CSRF crumb. Returns header dict or {} if crumb not required."""
-        try:
-            async with self._client() as c:
-                r = await c.get(f"{self.base}/crumbIssuer/api/json")
-            print(f"[CRUMB] status={r.status_code}", flush=True)
-            if r.status_code == 200:
-                data = r.json()
-                return {data["crumbRequestField"]: data["crumb"]}
-        except Exception as e:
-            print(f"[CRUMB] exception: {e}", flush=True)
-        return {}
-
-    async def trigger_job(self, job: str, params: dict) -> int:
-        crumb = await self._get_crumb()
+    async def _post(self, path: str, data: dict | None = None) -> httpx.Response:
+        """POST using a single client session so the CSRF crumb stays valid."""
         async with self._client() as c:
-            r = await c.post(
-                f"{self.base}/job/{job}/buildWithParameters",
-                data=params,
-                headers=crumb,
-            )
+            crumb_r = await c.get(f"{self.base}/crumbIssuer/api/json")
+            crumb_headers = {}
+            if crumb_r.status_code == 200:
+                d = crumb_r.json()
+                crumb_headers = {d["crumbRequestField"]: d["crumb"]}
+            r = await c.post(f"{self.base}{path}", data=data or {}, headers=crumb_headers)
         if not r.is_success:
-            body = r.text[:500]
             raise httpx.HTTPStatusError(
-                f"{r.status_code} from {r.url} — {body}",
+                f"{r.status_code} from {r.url} — {r.text[:400]}",
                 request=r.request,
                 response=r,
             )
-        # Jenkins returns queue item URL in Location header
+        return r
+
+    async def trigger_job(self, job: str, params: dict) -> int:
+        r = await self._post(f"/job/{job}/buildWithParameters", params)
         location = r.headers.get("Location", "")
         match = re.search(r"/queue/item/(\d+)/", location)
         return int(match.group(1)) if match else 0
 
     async def abort_build(self, job: str, build_num: int) -> None:
-        crumb = await self._get_crumb()
-        async with self._client() as c:
-            r = await c.post(
-                f"{self.base}/job/{job}/{build_num}/stop",
-                headers=crumb,
-            )
-            r.raise_for_status()
+        await self._post(f"/job/{job}/{build_num}/stop")
 
     async def list_agents(self) -> list[dict]:
+        params = {"tree": "computer[displayName,offline,idle,description]"}
         async with self._client() as c:
-            r = await c.get(
-                f"{self.base}/computer/api/json",
-                params={"tree": "computer[displayName,offline,idle,description]"},
-            )
-            self._check_auth(r)
-            r.raise_for_status()
-            return r.json().get("computer", [])
+            r = await c.get(f"{self.base}/computer/api/json", params=params)
+        if r.status_code in (401, 403):
+            async with httpx.AsyncClient(**_CLIENT_DEFAULTS) as anon:
+                r = await anon.get(f"{self.base}/computer/api/json", params=params)
+        self._check_auth(r)
+        r.raise_for_status()
+        return r.json().get("computer", [])
 
     async def get_all_jobs(self) -> list[dict]:
         async with self._client() as c:

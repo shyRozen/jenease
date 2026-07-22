@@ -10,8 +10,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // 401s from Jenkins API calls (clusters, deploy, etc.) mean the Jenkins token is bad
   // but the session itself is still valid — show an error, don't kick the user out.
   if (res.status === 401 && path === '/auth/me') {
-    await fetch(`${BASE}/auth/logout`, { method: 'POST', credentials: 'include' })
-    window.location.href = '/'
     throw new Error('Session expired — please log in again')
   }
   if (!res.ok) {

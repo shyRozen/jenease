@@ -18,3 +18,4 @@ frontend/dist/
 
 # Playwright MCP snapshots
 .playwright-mcp/
+.env.test

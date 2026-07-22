@@ -1,12 +1,14 @@
-.PHONY: test-fast test-full test-backend test-frontend
+# Load .env.test if it exists (JENKINS_TEST_USER, JENKINS_TEST_TOKEN)
+-include .env.test
+export
 
-# Fast gate — run before every push (~15s)
+.PHONY: test-fast test-full test-backend test-frontend test-jenkins
+
+# Fast gate — run before every push (~15s, no Jenkins needed)
 test-fast: test-backend test-frontend
 
-# Full suite — run before releases (requires JENKINS_TEST_TOKEN for real Jenkins tests)
-test-full: test-backend test-frontend
-	@echo "Running full suite (real Jenkins tests if JENKINS_TEST_TOKEN is set)..."
-	cd backend && python -m pytest tests/ -v
+# Full suite including Jenkins integration tests
+test-full: test-backend test-frontend test-jenkins
 
 test-backend:
 	cd backend && python -m pytest tests/test_job_parser.py tests/test_jenkins_parse.py tests/test_names.py tests/test_api_auth.py tests/test_api_sequences.py -v
@@ -14,6 +16,6 @@ test-backend:
 test-frontend:
 	cd frontend && npm test
 
+# Jenkins integration tests — reads credentials from .env.test or shell env
 test-jenkins:
-	JENKINS_TEST_USER=srozen JENKINS_TEST_TOKEN=$(JENKINS_TEST_TOKEN) \
-	  cd backend && python -m pytest tests/test_api_jenkins.py -v
+	cd backend && python -m pytest tests/test_api_jenkins.py -v

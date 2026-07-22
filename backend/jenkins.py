@@ -48,8 +48,11 @@ class JenkinsClient:
     async def get_build(self, job: str, build_num: int) -> dict:
         async with self._client() as c:
             r = await c.get(f"{self.base}/job/{job}/{build_num}/api/json")
-            r.raise_for_status()
-            return r.json()
+        if r.status_code in (401, 403):
+            async with httpx.AsyncClient(**_CLIENT_DEFAULTS) as anon:
+                r = await anon.get(f"{self.base}/job/{job}/{build_num}/api/json")
+        r.raise_for_status()
+        return r.json()
 
     async def get_job(self, job: str) -> dict:
         async with self._client() as c:

@@ -99,11 +99,12 @@ class JenkinsClient:
         try:
             async with self._client() as c:
                 r = await c.get(f"{self.base}/crumbIssuer/api/json")
+            print(f"[CRUMB] status={r.status_code}", flush=True)
             if r.status_code == 200:
                 data = r.json()
                 return {data["crumbRequestField"]: data["crumb"]}
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[CRUMB] exception: {e}", flush=True)
         return {}
 
     async def trigger_job(self, job: str, params: dict) -> int:
@@ -114,7 +115,13 @@ class JenkinsClient:
                 data=params,
                 headers=crumb,
             )
-        r.raise_for_status()
+        if not r.is_success:
+            body = r.text[:500]
+            raise httpx.HTTPStatusError(
+                f"{r.status_code} from {r.url} — {body}",
+                request=r.request,
+                response=r,
+            )
         # Jenkins returns queue item URL in Location header
         location = r.headers.get("Location", "")
         match = re.search(r"/queue/item/(\d+)/", location)

@@ -3,7 +3,11 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import ThroughputChart, { type DataPoint, SERIES, RW_SERIES } from './ThroughputChart'
 import SessionReplayModal, { type SessionFull, type SessionEvent } from './SessionReplayModal'
-import { getStreamHistory, updateHoldlast, updateHoldlastByType } from '../lib/clusterStreamManager'
+import {
+  getStreamHistory, updateHoldlast, updateHoldlastByType,
+  setLogStream, registerLogCallback as singletonRegisterLogCallback, getLogState,
+  type LogLine,
+} from '../lib/clusterStreamManager'
 
 interface SessionSummary {
   id: number; name: string; cluster_name: string; username: string
@@ -64,6 +68,7 @@ function WorkloadCard({
   registerLogCallback,
   collapsed = false,
   onToggleCollapse,
+  initialLogs,
 }: {
   workload: WorkloadEntry
   clusterName: string
@@ -73,8 +78,9 @@ function WorkloadCard({
   registerLogCallback?: (id: number, cb: ((data: any) => void) | null) => void
   collapsed?: boolean
   onToggleCollapse?: () => void
+  initialLogs?: string[]
 }) {
-  const [logs, setLogs]           = useState<string[]>([])
+  const [logs, setLogs]           = useState<string[]>(() => initialLogs ?? [])
   const [progress, setProgress]   = useState<number | null>(null)
   const [rate, setRate]           = useState<string>('')
   const [eta, setEta]             = useState<string>('')
@@ -408,7 +414,8 @@ export default function WorkloadPanel({
   const [confirmClearAll, setConfirmClearAll] = useState(false)
   const [prepulling, setPrepulling] = useState(false)
   const [prepullMsg, setPrepullMsg] = useState('')
-  const [rates, setRates] = useState<Record<number, number>>({})
+  const initLogState = useMemo(() => getLogState(clusterName), [clusterName])
+  const [rates, setRates] = useState<Record<number, number>>(() => initLogState?.logRates ?? {})
   const [history, setHistory] = useState<DataPoint[]>(() => initialHistory ?? [])
   // If initialHistory arrives after first render (timing edge case), seed once
   const seededRef = useRef(false)
@@ -429,6 +436,15 @@ export default function WorkloadPanel({
   const lastByTypeRef = useRef<{ rbd: number; cephfs: number; noobaa: number }>(
     getStreamHistory(clusterName)?.holdlastByType ?? { rbd: 0, cephfs: 0, noobaa: 0 }
   )
+  // Seed ratesRef from live log rates so setInterval sees hasLiveRates=true immediately
+  if (initLogState && Object.keys(initLogState.logRates).length > 0) {
+    if (Object.keys(ratesRef.current).length === 0) {
+      for (const [id, mb] of Object.entries(initLogState.logRates)) {
+        ratesRef.current[Number(id)] = mb
+        holdlastRatesRef.current[Number(id)] = mb
+      }
+    }
+  }
   const workloadsRef = useRef<WorkloadEntry[]>([])
 
   // Recording state
@@ -545,32 +561,17 @@ export default function WorkloadPanel({
   function toggleCard(id: number) { setCardOverrides(p => ({ ...p, [id]: !isCollapsed(id) })) }
   function toggleAll() { setAllCollapsed(p => !p); setCardOverrides({}) }
 
-  // ── Multiplexed log SSE ────────────────────────────────────────────────────
-  // One SSE connection for ALL active workloads — bypasses browser HTTP/1.1
-  // connection limit (~6 per origin) that previously capped visible cards at 5.
-  const logCallbacksRef = useRef<Map<number, (data: any) => void>>(new Map())
+  // ── Multiplexed log SSE (singleton — stays alive across navigation) ─────────
   const activeIds = activeWorkloads.map(w => w.id).sort().join(',')
 
   useEffect(() => {
-    if (!activeIds || !showList) return
-    const es = new EventSource(
-      `/api/clusters/${clusterName}/workloads/logs/multi?ids=${activeIds}`,
-      { withCredentials: true }
-    )
-    es.onmessage = (e) => {
-      try {
-        const { workload_id, ...data } = JSON.parse(e.data)
-        logCallbacksRef.current.get(workload_id)?.(data)
-      } catch {}
-    }
-    es.onerror = () => {}
-    return () => es.close()
+    if (!showList) return
+    setLogStream(clusterName, activeIds)
   }, [activeIds, clusterName, showList])
 
-  // Stable function — same ref across renders, so WorkloadCard useEffect doesn't re-fire
+  // Stable function — routes per-card callbacks through the singleton dispatcher
   const registerLogCallback = useCallback((wlId: number, cb: ((data: any) => void) | null) => {
-    if (cb) logCallbacksRef.current.set(wlId, cb)
-    else    logCallbacksRef.current.delete(wlId)
+    singletonRegisterLogCallback(wlId, cb)
   }, [])
   const { data: healthData } = useQuery<{ ceph_capacity?: { health?: string }; degraded_reason?: string; status?: string }>({
     queryKey: ['health', clusterName],
@@ -1429,6 +1430,7 @@ export default function WorkloadPanel({
               registerLogCallback={registerLogCallback}
               collapsed={isCollapsed(w.id)}
               onToggleCollapse={() => toggleCard(w.id)}
+              initialLogs={(initLogState?.logLines[w.id] ?? []).map((l: LogLine) => `[hist] ${l.text}`)}
               onDelete={() => {
                 updateHoldlast(w.id, null)
                 setRates(prev => { const n = {...prev}; delete n[w.id]; return n })

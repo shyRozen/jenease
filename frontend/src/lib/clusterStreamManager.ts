@@ -1,16 +1,13 @@
 /**
- * Module-level singleton that keeps the OSD SSE stream alive across navigation.
+ * Module-level singleton that keeps both the OSD SSE stream and the workload
+ * log SSE stream alive across navigation.
  *
- * Problem: when the user navigates away from ClusterDetail, the EventSource
- * closes. On return, a new exec fires into the toolbox pod and fio may burst
- * multiple disk-stats lines in rapid succession → tiny delta_t → huge spike.
+ * OSD stream: stays alive permanently for the current cluster. Feeds the OSD
+ * tile charts and total throughput history.
  *
- * Solution: never close the stream while the user is logged in.
- * The stream for the last-visited cluster keeps running in the background.
- * On return to the same cluster: no reconnect, no spike, full history ready.
- * On navigation to a different cluster: old stream closes, new one opens.
- *
- * Weight: 1 EventSource (TCP socket), ~1 KB/s, ceph command already running.
+ * Log stream: stays alive while workloads are active (same cluster). Buffers
+ * the last 5 minutes of log lines and current rates per workload. On return
+ * to the page, WorkloadCard terminals seed immediately — no "waiting for output".
  */
 
 export type IopsData = {
@@ -30,21 +27,28 @@ export type ThroughputPoint = {
   [key: string]: number | undefined
 }
 
+export type LogLine = { ts: number; text: string }
+
 type Listener = (data: IopsData) => void
 
 const state: {
+  // ── OSD stream ──────────────────────────────────────────────────────────────
   clusterName: string
   kubeconfigUrl: string
   es: EventSource | null
   osdHistory: Record<string, OsdPoint[]>
-  // Total throughput history — last 300 points (~10 min at 2s)
-  // Workload breakdown (rbd/cephfs/noobaa) is 0 while user is away;
-  // total reflects real Ceph I/O the whole time.
   throughputHistory: ThroughputPoint[]
   lastData: IopsData | null
   holdlastRates: Record<number, number>
   holdlastByType: { rbd: number; cephfs: number; noobaa: number }
   listeners: Set<Listener>
+  // ── Log stream ───────────────────────────────────────────────────────────────
+  logEs: EventSource | null
+  logClusterName: string
+  logActiveIds: string
+  logLines: Record<number, LogLine[]>    // last 5 min per workload
+  logRates: Record<number, number>       // latest MB/s per workload
+  logCallbacks: Map<number, (data: any) => void>
 } = {
   clusterName: '',
   kubeconfigUrl: '',
@@ -55,6 +59,20 @@ const state: {
   holdlastRates: {},
   holdlastByType: { rbd: 0, cephfs: 0, noobaa: 0 },
   listeners: new Set(),
+  logEs: null,
+  logClusterName: '',
+  logActiveIds: '',
+  logLines: {},
+  logRates: {},
+  logCallbacks: new Map(),
+}
+
+function parseRateMb(rateStr: string): number | null {
+  const m = rateStr.match(/^([\d.]+)\s*(MiB|MB|KiB|KB|GiB|GB)\/s/)
+  if (!m) return null
+  const val = parseFloat(m[1])
+  const unit = m[2]
+  return unit.startsWith('K') ? val / 1024 : unit.startsWith('G') ? val * 1024 : val
 }
 
 function openStream(clusterName: string, kubeconfigUrl: string) {
@@ -65,6 +83,14 @@ function openStream(clusterName: string, kubeconfigUrl: string) {
   state.lastData         = null
   state.holdlastRates    = {}
   state.holdlastByType   = { rbd: 0, cephfs: 0, noobaa: 0 }
+  // Clear log state on cluster change
+  state.logEs?.close()
+  state.logEs         = null
+  state.logClusterName = ''
+  state.logActiveIds  = ''
+  state.logLines      = {}
+  state.logRates      = {}
+  state.logCallbacks.clear()
 
   const url = `/api/clusters/${clusterName}/iops/stream?kubeconfig_url=${encodeURIComponent(kubeconfigUrl)}`
   const es  = new EventSource(url, { withCredentials: true })
@@ -89,7 +115,6 @@ function openStream(clusterName: string, kubeconfigUrl: string) {
         state.osdHistory[osd] = [...prev.slice(-720), { ts: now, r, w, total: r + w }]
       }
 
-      // Accumulate total throughput history (workload breakdown stays 0 while user is away)
       state.throughputHistory = [
         ...state.throughputHistory.slice(-300),
         { ts: now, total: totalR + totalW, rbd: 0, cephfs: 0, noobaa: 0, ceph_r: totalR, ceph_w: totalW },
@@ -103,9 +128,8 @@ function openStream(clusterName: string, kubeconfigUrl: string) {
 }
 
 /**
- * Attach to the stream for a cluster. Returns the existing OSD history
- * immediately so the component can render without waiting for first event.
- * Call detach() on unmount — the stream keeps running in the background.
+ * Attach to the OSD stream for a cluster. Returns existing history immediately.
+ * Call detachStream() on unmount — stream keeps running in the background.
  */
 export function attachStream(
   clusterName: string,
@@ -126,12 +150,12 @@ export function attachStream(
 
 export function detachStream(onData: Listener) {
   state.listeners.delete(onData)
-  // Stream intentionally left running — kept alive for instant reconnect
+  // Stream intentionally left running
 }
 
 /**
- * Synchronously read current history for a cluster — safe to call during render.
- * Returns null if the singleton is tracking a different cluster.
+ * Synchronously read current OSD history — safe to call during render.
+ * Returns null if singleton is tracking a different cluster.
  */
 export function getStreamHistory(clusterName: string): {
   throughputHistory: ThroughputPoint[]
@@ -159,7 +183,76 @@ export function updateHoldlastByType(byType: { rbd: number; cephfs: number; noob
   state.holdlastByType = { ...byType }
 }
 
-/** Call on logout or page unload to clean up. */
+// ── Log stream ────────────────────────────────────────────────────────────────
+
+/**
+ * Open or reuse the multiplexed log SSE for the given cluster + workload IDs.
+ * Reconnects only when the ID set changes. Stays alive when WorkloadPanel unmounts.
+ * Buffers last 5 min of log lines and current rates per workload.
+ */
+export function setLogStream(clusterName: string, activeIds: string) {
+  const same = state.logClusterName === clusterName && state.logActiveIds === activeIds
+  const dead  = !state.logEs || state.logEs.readyState === EventSource.CLOSED
+  if (same && !dead) return
+
+  state.logEs?.close()
+  state.logClusterName = clusterName
+  state.logActiveIds   = activeIds
+
+  if (!activeIds) { state.logEs = null; return }
+
+  const url = `/api/clusters/${clusterName}/workloads/logs/multi?ids=${activeIds}`
+  const es  = new EventSource(url, { withCredentials: true })
+  state.logEs = es
+
+  es.onmessage = (e) => {
+    try {
+      const { workload_id, ...data } = JSON.parse(e.data)
+      const now = Date.now()
+      const cutoff = now - 5 * 60 * 1000
+
+      if (data.line) {
+        const prev = state.logLines[workload_id] ?? []
+        state.logLines[workload_id] = [
+          ...prev.filter((l: LogLine) => l.ts > cutoff),
+          { ts: now, text: data.line },
+        ]
+      }
+      if (data.rate) {
+        const mb = parseRateMb(data.rate)
+        if (mb !== null) {
+          state.logRates[workload_id] = mb
+          // Keep OSD holdlast in sync so the chart never drops while off-page
+          if (mb > 0) state.holdlastRates[workload_id] = mb
+        }
+      }
+
+      state.logCallbacks.get(workload_id)?.(data)
+    } catch {}
+  }
+
+  es.onerror = () => {}
+}
+
+/** Register a per-WorkloadCard callback. Cleared on card unmount, stream stays alive. */
+export function registerLogCallback(workloadId: number, cb: ((data: any) => void) | null) {
+  if (cb) state.logCallbacks.set(workloadId, cb)
+  else    state.logCallbacks.delete(workloadId)
+}
+
+/**
+ * Synchronously read buffered log lines and current rates — safe to call during render.
+ * Returns null if the singleton is tracking a different cluster.
+ */
+export function getLogState(clusterName: string): {
+  logLines: Record<number, LogLine[]>
+  logRates: Record<number, number>
+} | null {
+  if (state.logClusterName !== clusterName) return null
+  return { logLines: state.logLines, logRates: state.logRates }
+}
+
+/** Call on logout to clean up both streams. */
 export function closeStream() {
   state.es?.close()
   state.es = null
@@ -170,4 +263,11 @@ export function closeStream() {
   state.holdlastRates = {}
   state.holdlastByType = { rbd: 0, cephfs: 0, noobaa: 0 }
   state.listeners.clear()
+  state.logEs?.close()
+  state.logEs = null
+  state.logClusterName = ''
+  state.logActiveIds = ''
+  state.logLines = {}
+  state.logRates = {}
+  state.logCallbacks.clear()
 }

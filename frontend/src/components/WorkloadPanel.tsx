@@ -139,6 +139,7 @@ function WorkloadCard({
   function triggerCleanup() {
     if (cleaning) return
     onRateUpdate?.(workload.id, null)
+    registerLogCallback?.(workload.id, null)  // stop rate events immediately, don't wait for re-render
     esRef.current?.close()
     setCleaning(true)
     setLogs(prev => [...prev, '[jenease] Starting cleanup…'])

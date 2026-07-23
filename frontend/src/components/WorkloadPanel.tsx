@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import ThroughputChart, { type DataPoint, SERIES, RW_SERIES } from './ThroughputChart'
 import SessionReplayModal, { type SessionFull, type SessionEvent } from './SessionReplayModal'
-import { getStreamHistory, updateHoldlast } from '../lib/clusterStreamManager'
+import { getStreamHistory, updateHoldlast, updateHoldlastByType } from '../lib/clusterStreamManager'
 
 interface SessionSummary {
   id: number; name: string; cluster_name: string; username: string
@@ -426,6 +426,9 @@ export default function WorkloadPanel({
     [clusterName]
   )
   const holdlastRatesRef = useRef<Record<number, number>>(singletonHoldlast)
+  const lastByTypeRef = useRef<{ rbd: number; cephfs: number; noobaa: number }>(
+    getStreamHistory(clusterName)?.holdlastByType ?? { rbd: 0, cephfs: 0, noobaa: 0 }
+  )
   const workloadsRef = useRef<WorkloadEntry[]>([])
 
   // Recording state
@@ -477,13 +480,17 @@ export default function WorkloadPanel({
         byType[w.workload_type] = (byType[w.workload_type] ?? 0) + r
       }
       const fioTotal = Object.values(byType).reduce((a, b) => a + b, 0)
-      const pool = poolBreakdownRef.current
-      const rbd    = fioTotal > 0 ? byType.rbd    : pool.rbd
-      const cephfs = fioTotal > 0 ? byType.cephfs : pool.cephfs
-      const noobaa = fioTotal > 0 ? byType.noobaa : pool.noobaa
+      if (fioTotal > 0) {
+        // Save per-type breakdown to singleton so it survives navigation
+        lastByTypeRef.current = { rbd: byType.rbd, cephfs: byType.cephfs, noobaa: byType.noobaa }
+        updateHoldlastByType(lastByTypeRef.current)
+      }
+      const last = lastByTypeRef.current
+      const rbd    = fioTotal > 0 ? byType.rbd    : last.rbd
+      const cephfs = fioTotal > 0 ? byType.cephfs : last.cephfs
+      const noobaa = fioTotal > 0 ? byType.noobaa : last.noobaa
       // When no fio output yet (reconnecting / pods waiting for input):
-      // use OSD aggregate — same source as the singleton uses while off-page.
-      // This keeps the chart flat/continuous instead of dropping to 0.
+      // use OSD aggregate — same source as singleton uses while off-page.
       const total = fioTotal > 0
         ? fioTotal
         : (cephAggRef.current.r + cephAggRef.current.w) || (rbd + cephfs + noobaa)

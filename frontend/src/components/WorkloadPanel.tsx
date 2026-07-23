@@ -485,7 +485,11 @@ export default function WorkloadPanel({
         lastByTypeRef.current = { rbd: byType.rbd, cephfs: byType.cephfs, noobaa: byType.noobaa }
         updateHoldlastByType(lastByTypeRef.current)
       }
-      const last = lastByTypeRef.current
+      // Only use holdlast when there are active holdlast entries (pods mid-reconnect).
+      // When holdlastRatesRef is empty (all rates explicitly cleared = workloads done),
+      // fall through to zero so the chart drops correctly.
+      const holdlastActive = Object.keys(holdlastRatesRef.current).length > 0
+      const last = holdlastActive ? lastByTypeRef.current : { rbd: 0, cephfs: 0, noobaa: 0 }
       const rbd    = fioTotal > 0 ? byType.rbd    : last.rbd
       const cephfs = fioTotal > 0 ? byType.cephfs : last.cephfs
       const noobaa = fioTotal > 0 ? byType.noobaa : last.noobaa

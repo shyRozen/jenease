@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import ThroughputChart, { type DataPoint, SERIES, RW_SERIES } from './ThroughputChart'
 import SessionReplayModal, { type SessionFull, type SessionEvent } from './SessionReplayModal'
+import { getStreamHistory, updateHoldlast } from '../lib/clusterStreamManager'
 
 interface SessionSummary {
   id: number; name: string; cluster_name: string; username: string
@@ -420,9 +421,11 @@ export default function WorkloadPanel({
   }, [initialHistory])
   const localRatesRef = useRef<Record<number, number>>({})
   const ratesRef = sharedRatesRef ?? localRatesRef
-  // Holdlast: last known non-zero rate per workload — used while reconnecting
-  // or while pods are "waiting for input" after navigation back
-  const holdlastRatesRef = useRef<Record<number, number>>({})
+  const singletonHoldlast = useMemo(
+    () => getStreamHistory(clusterName)?.holdlastRates ?? {},
+    [clusterName]
+  )
+  const holdlastRatesRef = useRef<Record<number, number>>(singletonHoldlast)
   const workloadsRef = useRef<WorkloadEntry[]>([])
 
   // Recording state
@@ -447,8 +450,11 @@ export default function WorkloadPanel({
   })
 
   function handleRateUpdate(id: number, rateMb: number | null) {
-    if (rateMb != null && rateMb > 0) holdlastRatesRef.current[id] = rateMb
-    if (rateMb == null) delete holdlastRatesRef.current[id]  // workload ended
+    if (rateMb != null && rateMb > 0) {
+      holdlastRatesRef.current[id] = rateMb
+      updateHoldlast(id, rateMb)
+    }
+    if (rateMb == null) delete holdlastRatesRef.current[id]
     setRates(prev => {
       const next = { ...prev }
       if (rateMb == null) delete next[id]
@@ -471,13 +477,16 @@ export default function WorkloadPanel({
         byType[w.workload_type] = (byType[w.workload_type] ?? 0) + r
       }
       const fioTotal = Object.values(byType).reduce((a, b) => a + b, 0)
-      // When no fio workloads active, fill in pool breakdown from Ceph metrics
-      // so the chart shows RBD/CephFS/NooBaa lines for all users at 1s resolution.
       const pool = poolBreakdownRef.current
       const rbd    = fioTotal > 0 ? byType.rbd    : pool.rbd
       const cephfs = fioTotal > 0 ? byType.cephfs : pool.cephfs
       const noobaa = fioTotal > 0 ? byType.noobaa : pool.noobaa
-      const total  = fioTotal > 0 ? fioTotal : rbd + cephfs + noobaa
+      // When no fio output yet (reconnecting / pods waiting for input):
+      // use OSD aggregate — same source as the singleton uses while off-page.
+      // This keeps the chart flat/continuous instead of dropping to 0.
+      const total = fioTotal > 0
+        ? fioTotal
+        : (cephAggRef.current.r + cephAggRef.current.w) || (rbd + cephfs + noobaa)
       const now = Date.now()
       setHistory(prev => {
         const next = [...prev.slice(-600), {
@@ -1409,6 +1418,7 @@ export default function WorkloadPanel({
               collapsed={isCollapsed(w.id)}
               onToggleCollapse={() => toggleCard(w.id)}
               onDelete={() => {
+                updateHoldlast(w.id, null)
                 setRates(prev => { const n = {...prev}; delete n[w.id]; return n })
                 queryClient.invalidateQueries({ queryKey: ['workloads', clusterName] })
               }}

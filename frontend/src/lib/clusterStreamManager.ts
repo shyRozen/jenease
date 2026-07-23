@@ -42,6 +42,7 @@ const state: {
   // total reflects real Ceph I/O the whole time.
   throughputHistory: ThroughputPoint[]
   lastData: IopsData | null
+  holdlastRates: Record<number, number>
   listeners: Set<Listener>
 } = {
   clusterName: '',
@@ -50,6 +51,7 @@ const state: {
   osdHistory: {},
   throughputHistory: [],
   lastData: null,
+  holdlastRates: {},
   listeners: new Set(),
 }
 
@@ -59,6 +61,7 @@ function openStream(clusterName: string, kubeconfigUrl: string) {
   state.osdHistory       = {}
   state.throughputHistory = []
   state.lastData         = null
+  state.holdlastRates    = {}
 
   const url = `/api/clusters/${clusterName}/iops/stream?kubeconfig_url=${encodeURIComponent(kubeconfigUrl)}`
   const es  = new EventSource(url, { withCredentials: true })
@@ -131,13 +134,20 @@ export function getStreamHistory(clusterName: string): {
   throughputHistory: ThroughputPoint[]
   osdHistory: Record<string, OsdPoint[]>
   lastData: IopsData | null
+  holdlastRates: Record<number, number>
 } | null {
   if (state.clusterName !== clusterName || !state.es) return null
   return {
     throughputHistory: state.throughputHistory,
     osdHistory: state.osdHistory,
     lastData: state.lastData,
+    holdlastRates: state.holdlastRates,
   }
+}
+
+export function updateHoldlast(id: number, rate: number | null) {
+  if (rate != null && rate > 0) state.holdlastRates[id] = rate
+  else delete state.holdlastRates[id]
 }
 
 /** Call on logout or page unload to clean up. */
@@ -148,5 +158,6 @@ export function closeStream() {
   state.osdHistory = {}
   state.throughputHistory = []
   state.lastData = null
+  state.holdlastRates = {}
   state.listeners.clear()
 }

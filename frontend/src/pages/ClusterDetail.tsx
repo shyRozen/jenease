@@ -425,7 +425,15 @@ export default function ClusterDetail() {
   // Workload history from WorkloadPanel (populated via historyRef prop)
   const workloadHistoryRef = useRef<DataPoint[]>([])
   // Current OSD aggregate totals (for text readout + WorkloadPanel R/W toggle)
-  const [cephAgg, setCephAgg] = useState<{r: number, w: number}>({r: 0, w: 0})
+  // Seed cephAgg from singleton's last point so WorkloadPanel setInterval tick at t+1s
+  // isn't zero while waiting for first OSD SSE event (~2s).
+  const initCephAgg = useMemo(() => {
+    if (!name) return { r: 0, w: 0 }
+    const hist = getStreamHistory(name)?.throughputHistory ?? []
+    const last = hist[hist.length - 1]
+    return last ? { r: last.ceph_r ?? 0, w: last.ceph_w ?? 0 } : { r: 0, w: 0 }
+  }, [name])
+  const [cephAgg, setCephAgg] = useState<{r: number, w: number}>(initCephAgg)
   const [osdGridWidth, setOsdGridWidth] = useState(0)
   const osdGridRef = useRef<HTMLDivElement>(null)
   const [, forceRender] = useState(0)

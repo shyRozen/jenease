@@ -6,28 +6,28 @@ import AllClusters from '../pages/AllClusters'
 
 describe('AllClusters page', () => {
   it('shows cluster name', async () => {
-    renderWithProviders(<AllClusters />)
+    renderWithProviders(<AllClusters username="srozen" />)
     await waitFor(() => {
       expect(screen.getByText('srozen-v-vs')).toBeInTheDocument()
     })
   })
 
   it('shows OCP version', async () => {
-    renderWithProviders(<AllClusters />)
+    renderWithProviders(<AllClusters username="srozen" />)
     await waitFor(() => {
       expect(screen.getByText(/OCP 4\.16/)).toBeInTheDocument()
     })
   })
 
   it('shows OCS version', async () => {
-    renderWithProviders(<AllClusters />)
+    renderWithProviders(<AllClusters username="srozen" />)
     await waitFor(() => {
       expect(screen.getByText(/OCS 4\.16/)).toBeInTheDocument()
     })
   })
 
   it('shows platform label', async () => {
-    renderWithProviders(<AllClusters />)
+    renderWithProviders(<AllClusters username="srozen" />)
     await waitFor(() => {
       const els = screen.queryAllByText('vSphere')
       expect(els.length).toBeGreaterThan(0)
@@ -35,7 +35,7 @@ describe('AllClusters page', () => {
   })
 
   it('filters clusters by search', async () => {
-    renderWithProviders(<AllClusters />)
+    renderWithProviders(<AllClusters username="srozen" />)
     await waitFor(() => screen.getByText('srozen-v-vs'))
 
     const searchInput = screen.getByPlaceholderText(/search/i)

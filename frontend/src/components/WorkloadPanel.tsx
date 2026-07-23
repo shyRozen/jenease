@@ -420,6 +420,9 @@ export default function WorkloadPanel({
   }, [initialHistory])
   const localRatesRef = useRef<Record<number, number>>({})
   const ratesRef = sharedRatesRef ?? localRatesRef
+  // Holdlast: last known non-zero rate per workload — used while reconnecting
+  // or while pods are "waiting for input" after navigation back
+  const holdlastRatesRef = useRef<Record<number, number>>({})
   const workloadsRef = useRef<WorkloadEntry[]>([])
 
   // Recording state
@@ -444,6 +447,8 @@ export default function WorkloadPanel({
   })
 
   function handleRateUpdate(id: number, rateMb: number | null) {
+    if (rateMb != null && rateMb > 0) holdlastRatesRef.current[id] = rateMb
+    if (rateMb == null) delete holdlastRatesRef.current[id]  // workload ended
     setRates(prev => {
       const next = { ...prev }
       if (rateMb == null) delete next[id]
@@ -457,8 +462,12 @@ export default function WorkloadPanel({
   useEffect(() => {
     const id = setInterval(() => {
       const byType: Record<string, number> = { rbd: 0, cephfs: 0, noobaa: 0 }
+      const hasLiveRates = workloadsRef.current.some(w => (ratesRef.current[w.id] ?? 0) > 0)
       for (const w of workloadsRef.current) {
-        const r = ratesRef.current[w.id] ?? 0
+        // If no live rates yet (reconnecting / pods waiting for input), use holdlast
+        const r = hasLiveRates
+          ? (ratesRef.current[w.id] ?? 0)
+          : (holdlastRatesRef.current[w.id] ?? 0)
         byType[w.workload_type] = (byType[w.workload_type] ?? 0) + r
       }
       const fioTotal = Object.values(byType).reduce((a, b) => a + b, 0)

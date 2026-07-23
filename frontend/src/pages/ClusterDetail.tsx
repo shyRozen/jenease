@@ -501,7 +501,19 @@ export default function ClusterDetail() {
   // Read history synchronously during render so WorkloadPanel gets it on first mount,
   // before any effect runs. useMemo re-runs only when the cluster name changes.
   const streamHistory = useMemo(() => (name ? getStreamHistory(name) : null), [name])
-  const initialThroughputHistory = (streamHistory?.throughputHistory ?? []) as DataPoint[]
+  // Overlay holdlastByType proportionally so history shows RBD/CephFS/NooBaa lines,
+  // not just total. The OSD singleton only stores Ceph total; the breakdown comes
+  // from the last known fio proportions.
+  const initialThroughputHistory = useMemo(() => {
+    const pts = streamHistory?.throughputHistory ?? []
+    const bd = streamHistory?.holdlastByType ?? { rbd: 0, cephfs: 0, noobaa: 0 }
+    const bdTotal = bd.rbd + bd.cephfs + bd.noobaa
+    if (bdTotal === 0) return pts as DataPoint[]
+    return pts.map(p => {
+      const scale = p.total / bdTotal
+      return { ...p, rbd: bd.rbd * scale, cephfs: bd.cephfs * scale, noobaa: bd.noobaa * scale } as DataPoint
+    })
+  }, [streamHistory])
 
   // Seed OSD per-chart history synchronously too (ref mutation is safe during render)
   if (streamHistory && Object.keys(streamHistory.osdHistory).length > 0 &&

@@ -544,7 +544,7 @@ export default function WorkloadPanel({
     return () => clearInterval(id)
   }, [recordingStart])
 
-  const { data: workloads = [], refetch } = useQuery<WorkloadEntry[]>({
+  const { data: workloads = [], refetch, isSuccess: workloadsLoaded } = useQuery<WorkloadEntry[]>({
     queryKey: ['workloads', clusterName],
     queryFn: () => api.get(`/clusters/${clusterName}/workloads`),
     refetchInterval: 10_000,
@@ -565,9 +565,11 @@ export default function WorkloadPanel({
   const activeIds = activeWorkloads.map(w => w.id).sort().join(',')
 
   useEffect(() => {
-    if (!showList) return
+    // Guard with workloadsLoaded: don't call with empty activeIds before the query
+    // returns — that would kill the background singleton SSE prematurely.
+    if (!showList || !workloadsLoaded) return
     setLogStream(clusterName, activeIds)
-  }, [activeIds, clusterName, showList])
+  }, [activeIds, clusterName, showList, workloadsLoaded])
 
   // Stable function — routes per-card callbacks through the singleton dispatcher
   const registerLogCallback = useCallback((wlId: number, cb: ((data: any) => void) | null) => {

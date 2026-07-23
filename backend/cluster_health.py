@@ -310,23 +310,42 @@ def _fetch_ceph_metrics_direct(api_client, cfg, cache_suffix: str = 'iops') -> d
     hl_store = _CEPH_HOLDLAST.setdefault(cache_key, {})
 
     def delta_rate(metric: str) -> list:
-        """Compute per-label rate (counter delta / dt).
-        When a counter is unchanged (Ceph updates perf counters every ~5s),
-        return the last non-zero rate from holdlast cache (up to HOLDLAST_TTL).
-        This prevents zero-spike artifacts in 1s SSE streams."""
+        """Compute per-label rate (counter delta / real_dt).
+
+        The ceph-exporter updates counters every ~5s, but we poll every ~1s.
+        Using poll interval (dt) as denominator causes 5× spikes on each
+        counter update because delta accumulates over 5s but dt is only 1s.
+
+        Fix: track the counter value and timestamp at the last CHANGE.
+        When the counter jumps, divide by (now - last_change_ts) not by dt.
+        When unchanged, return the holdlast rate (counter hasn't been updated yet).
+        """
         idx = {tuple(sorted(pl.items())): pv for pl, pv in prev_data.get(metric, [])}
         out = []
         for labels, cv in all_cur.get(metric, []):
-            key = tuple(sorted(labels.items()))
-            pv  = idx.get(key)
+            key    = tuple(sorted(labels.items()))
+            hl_key = f"{metric}:{key}"
+            pv     = idx.get(key)
             if pv is not None:
                 delta = cv - pv
                 if delta > 0:
-                    rate = delta / dt
-                    hl_store[f"{metric}:{key}"] = {'rate': rate, 'ts': now_ts}
+                    # Counter advanced — use time since the counter last changed,
+                    # not time since last poll, to avoid the update-interval spike.
+                    hl = hl_store.get(hl_key, {})
+                    last_val = hl.get('last_val')
+                    last_ts  = hl.get('last_ts', now_ts - dt)
+                    if last_val is not None and cv > last_val:
+                        real_dt = now_ts - last_ts
+                        real_delta = cv - last_val
+                    else:
+                        real_dt    = dt
+                        real_delta = delta
+                    rate = real_delta / max(real_dt, 0.5)
+                    hl_store[hl_key] = {'rate': rate, 'ts': now_ts,
+                                        'last_val': cv, 'last_ts': now_ts}
                 else:
-                    # Counter unchanged — use holdlast if within TTL, else 0
-                    hl = hl_store.get(f"{metric}:{key}")
+                    # Counter unchanged — ceph-exporter hasn't ticked yet.
+                    hl = hl_store.get(hl_key)
                     rate = (hl['rate'] if hl and (now_ts - hl['ts']) < _HOLDLAST_TTL else 0.0)
                 out.append((labels, rate))
         return out

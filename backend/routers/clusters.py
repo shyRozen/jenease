@@ -480,8 +480,8 @@ async def node_resources_endpoint(
             if s.endswith('M'):  return float(s[:-1])
             return float(s) / 1024 / 1024
 
-        # Get worker nodes
-        nodes = core.list_node(label_selector="node-role.kubernetes.io/worker=").items
+        # Get all nodes (workers + masters)
+        nodes = core.list_node().items
         node_info: dict[str, dict] = {}
         for n in nodes:
             alloc = n.status.allocatable or {}

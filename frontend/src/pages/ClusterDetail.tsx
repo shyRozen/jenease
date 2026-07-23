@@ -304,17 +304,45 @@ function OsdGrid({ count, up, osdSize, capacity, iops, osdStatus }: {
   )
 }
 
-function NodePanel({ node }: { node: NodeDetail }) {
+function ResourceBar({ label, pct, fill, used, total }: {
+  label: string; pct: number; fill: string; used: string; total: string
+}) {
+  return (
+    <div className="relative h-4 rounded overflow-hidden" style={{ background: '#1e2430' }}>
+      <div className="h-full rounded transition-all duration-500"
+        style={{ width: `${pct}%`, background: fill, opacity: 0.75 }} />
+      <div className="absolute inset-0 flex items-center justify-between px-1.5">
+        <span className="text-[9px] font-mono font-semibold" style={{ color: '#e6edf3' }}>{label}</span>
+        <span className="text-[9px] font-mono" style={{ color: '#e6edf3cc' }}>
+          {used}/{total} {pct.toFixed(0)}%
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function NodePanel({ node, res }: { node: NodeDetail; res?: NodeResource }) {
   const conditionKeys = ['Ready', 'MemoryPressure', 'DiskPressure', 'PIDPressure', 'NetworkUnavailable']
+
+  const cpuPct = res && res.cpu_alloc_m  > 0 ? Math.min((res.cpu_req_m  / res.cpu_alloc_m)  * 100, 100) : null
+  const memPct = res && res.mem_alloc_mib > 0 ? Math.min((res.mem_req_mib / res.mem_alloc_mib) * 100, 100) : null
+  const cpuFill = cpuPct != null ? (cpuPct > 90 ? '#f55' : cpuPct > 75 ? '#ffb347' : '#00d4ff') : '#00d4ff'
+  const memFill = memPct != null ? (memPct > 90 ? '#f55' : memPct > 75 ? '#ffb347' : '#50fa7b') : '#50fa7b'
+  const fmtCpu = (m: number) => m >= 1000 ? `${(m/1000).toFixed(1)}c` : `${Math.round(m)}m`
+  const fmtMib = (m: number) => m >= 1024 ? `${(m/1024).toFixed(0)}G` : `${Math.round(m)}M`
+
   return (
     <div className={`card p-3 space-y-2 border ${node.ready ? 'border-surface-4' : 'border-accent-red/40'}`}>
       <div className="flex items-center justify-between">
         <span className="font-mono text-xs font-semibold text-text-primary truncate">{node.name}</span>
-        <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border uppercase ${
-          node.role === 'master'
-            ? 'text-accent-cyan border-accent-cyan/30 bg-accent-cyan/10'
-            : 'text-accent-green border-accent-green/30 bg-accent-green/10'
-        }`}>{node.role}</span>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {res && <span className="text-[9px] font-mono text-text-muted">{res.pod_count}p</span>}
+          <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border uppercase ${
+            node.role === 'master'
+              ? 'text-accent-cyan border-accent-cyan/30 bg-accent-cyan/10'
+              : 'text-accent-green border-accent-green/30 bg-accent-green/10'
+          }`}>{node.role}</span>
+        </div>
       </div>
       <div className="grid grid-cols-2 gap-x-3 gap-y-1">
         {conditionKeys.map(k => (
@@ -324,6 +352,14 @@ function NodePanel({ node }: { node: NodeDetail }) {
           </div>
         ))}
       </div>
+      {cpuPct != null && (
+        <div className="space-y-1 pt-0.5">
+          <ResourceBar label="CPU" pct={cpuPct} fill={cpuFill}
+            used={fmtCpu(res!.cpu_req_m)} total={fmtCpu(res!.cpu_alloc_m)} />
+          <ResourceBar label="MEM" pct={memPct!} fill={memFill}
+            used={fmtMib(res!.mem_req_mib)} total={fmtMib(res!.mem_alloc_mib)} />
+        </div>
+      )}
       {node.kubelet && (
         <p className="text-[10px] font-mono text-text-muted truncate">{node.kubelet}</p>
       )}
@@ -562,7 +598,8 @@ export default function ClusterDetail() {
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
             {[...details.nodes_detail]
               .sort((a, b) => (a.role === b.role ? 0 : a.role === 'master' ? -1 : 1))
-              .map(n => <NodePanel key={n.name} node={n} />)
+              .map(n => <NodePanel key={n.name} node={n}
+                res={nodeResources?.nodes?.find(r => r.name === n.name)} />)
             }
           </div>
         )}
@@ -704,50 +741,6 @@ export default function ClusterDetail() {
                   cephAgg={cephAgg}
                 />
 
-                {/* Node resource bars — under the total graph, left column width */}
-                {(nodeResources?.nodes?.length ?? 0) > 0 && (
-                  <div className="space-y-1.5">
-                    <p className="text-[9px] font-mono text-text-muted uppercase tracking-widest">Node Resources</p>
-                    {nodeResources!.nodes!.map(n => {
-                      const cpuPct = n.cpu_alloc_m  > 0 ? Math.min((n.cpu_req_m  / n.cpu_alloc_m)  * 100, 100) : 0
-                      const memPct = n.mem_alloc_mib > 0 ? Math.min((n.mem_req_mib / n.mem_alloc_mib) * 100, 100) : 0
-                      const cpuFill = cpuPct > 90 ? '#f55' : cpuPct > 75 ? '#ffb347' : '#00d4ff'
-                      const memFill = memPct > 90 ? '#f55' : memPct > 75 ? '#ffb347' : '#50fa7b'
-                      const fmtMib = (m: number) => m >= 1024 ? `${(m/1024).toFixed(0)}G` : `${Math.round(m)}M`
-                      const fmtCpu = (m: number) => m >= 1000 ? `${(m/1000).toFixed(1)}c` : `${Math.round(m)}m`
-                      return (
-                        <div key={n.name} className="flex items-center gap-2">
-                          <span className="text-[9px] font-mono text-text-muted w-20 shrink-0 truncate" title={n.name}>
-                            {n.name.replace(/\..+/, '')}
-                          </span>
-                          {/* CPU bar */}
-                          <div className="flex-1 relative h-5 rounded overflow-hidden" style={{ background: '#1e2430' }}>
-                            <div className="h-full rounded transition-all duration-500"
-                              style={{ width: `${cpuPct}%`, background: cpuFill, opacity: 0.75 }} />
-                            <div className="absolute inset-0 flex items-center justify-between px-1.5">
-                              <span className="text-[9px] font-mono font-semibold" style={{ color: '#e6edf3' }}>CPU</span>
-                              <span className="text-[9px] font-mono" style={{ color: '#e6edf3cc' }}>
-                                {fmtCpu(n.cpu_req_m)}/{fmtCpu(n.cpu_alloc_m)} {cpuPct.toFixed(0)}%
-                              </span>
-                            </div>
-                          </div>
-                          {/* MEM bar */}
-                          <div className="flex-1 relative h-5 rounded overflow-hidden" style={{ background: '#1e2430' }}>
-                            <div className="h-full rounded transition-all duration-500"
-                              style={{ width: `${memPct}%`, background: memFill, opacity: 0.75 }} />
-                            <div className="absolute inset-0 flex items-center justify-between px-1.5">
-                              <span className="text-[9px] font-mono font-semibold" style={{ color: '#e6edf3' }}>MEM</span>
-                              <span className="text-[9px] font-mono" style={{ color: '#e6edf3cc' }}>
-                                {fmtMib(n.mem_req_mib)}/{fmtMib(n.mem_alloc_mib)} {memPct.toFixed(0)}%
-                              </span>
-                            </div>
-                          </div>
-                          <span className="text-[9px] font-mono text-text-muted w-8 shrink-0 text-right">{n.pod_count}p</span>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
               </div>
               {/* Right: launcher + recording (owner only) — shares ratesRef with list panel */}
               {isOwner && (

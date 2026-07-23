@@ -1703,9 +1703,14 @@ def parse_fio_line(line: str, size_bytes: int = 0, fio_state: dict | None = None
             if curr_w > prev_w:
                 delta_bytes = (curr_w - prev_w) * 512
                 delta_t = now - prev_t
-                if "rate" not in result and delta_t > 0:
+                # Require at least 0.5s between disk-stats readings.
+                # Smaller intervals produce meaningless rates when fio bursts
+                # multiple lines rapidly (delta_t near zero → enormous spike).
+                if "rate" not in result and delta_t >= 0.5:
                     rate_mb = delta_bytes / delta_t / 1_048_576
-                    result["rate"] = f"{rate_mb:.1f}MiB/s"
+                    # Sanity cap: discard anything above 10 GB/s per workload
+                    if rate_mb <= 10_000:
+                        result["rate"] = f"{rate_mb:.1f}MiB/s"
                 fio_state["prev_w"] = curr_w
                 fio_state["prev_t"] = now
             if "progress" not in result and size_bytes > 0 and curr_w > 0:

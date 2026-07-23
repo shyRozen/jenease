@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
-import { useRef, useEffect, useState } from 'react'
+import { useRef, useEffect, useState, useCallback } from 'react'
 import { api } from '../api/client'
 import WorkloadPanel from '../components/WorkloadPanel'
 import ThroughputChart, { OSD_SERIES, type DataPoint } from '../components/ThroughputChart'
+import { attachStream, detachStream, type IopsData } from '../lib/clusterStreamManager'
 
 // ── types ──────────────────────────────────────────────────────────────────
 
@@ -413,13 +414,7 @@ export default function ClusterDetail() {
     refetchInterval: 3_000,
   })
 
-  // OSD IOPS + throughput — SSE stream from Ceph (real 1s data via parallel scraping)
-  type IopsData = {
-    osd_iops?: Record<string, { r?: number; w?: number }>
-    osd_throughput_mb?: Record<string, { r?: number; w?: number }>
-    pool_throughput_mb?: Record<string, { r?: number; w?: number }>
-    osd_status?: Record<string, { up?: number; in?: number }>
-  }
+    // OSD IOPS + throughput — kept alive in module singleton across navigation
   const [iopsData, setIopsData] = useState<IopsData | null>(null)
   // kubeconfig_url is extracted from clusterList (declared below) — store in state
   // so the SSE effect can depend on it cleanly
@@ -492,18 +487,24 @@ export default function ClusterDetail() {
   })
   const cluster = clusterList.find((c: any) => c.cluster_name === name)
 
-  // SSE stream — pass kubeconfig_url like /fstrim and /worker-nodes do
+  // SSE stream — singleton kept alive across navigation (no reconnect = no spike)
   const kubeconfigUrl = cluster?.kubeconfig_url
+  const onIopsData = useCallback((data: IopsData) => setIopsData(data), [])
   useEffect(() => {
     if (!isClusterActive || !kubeconfigUrl) return
-    const url = `/api/clusters/${name}/iops/stream?kubeconfig_url=${encodeURIComponent(kubeconfigUrl)}`
-    const es = new EventSource(url, { withCredentials: true })
-    es.onmessage = (e) => {
-      try { setIopsData(JSON.parse(e.data)) } catch {}
+    const { osdHistory, lastData } = attachStream(name!, kubeconfigUrl, onIopsData)
+    // Seed OSD history from singleton so charts show immediately on return
+    if (Object.keys(osdHistory).length > 0) {
+      osdHistoryRef.current = Object.fromEntries(
+        Object.entries(osdHistory).map(([osd, pts]) => [
+          osd,
+          pts.map(p => ({ ts: p.ts, total: p.total, rbd: 0, cephfs: 0, noobaa: 0, r: p.r, w: p.w } as unknown as DataPoint)),
+        ])
+      )
     }
-    es.onerror = () => {}
-    return () => es.close()
-  }, [name, isClusterActive, kubeconfigUrl])
+    if (lastData) setIopsData(lastData)
+    return () => detachStream(onIopsData)
+  }, [name, isClusterActive, kubeconfigUrl, onIopsData])
 
   const { data: nodeResources } = useQuery<{ nodes: NodeResource[] }>({
     queryKey: ['node-resources', name, kubeconfigUrl],

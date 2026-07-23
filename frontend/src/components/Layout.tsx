@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import type { User } from '../types'
+import { closeStream } from '../lib/clusterStreamManager'
 
 const NAV = [
   { to: '/clusters',     label: 'My Clusters',  icon: '⬡' },
@@ -17,6 +18,7 @@ export default function Layout() {
   const { data: user } = useQuery<User>({ queryKey: ['me'], queryFn: () => api.get('/auth/me') })
 
   async function logout() {
+    closeStream()
     await api.post('/auth/logout')
     navigate('/login')
     window.location.reload()

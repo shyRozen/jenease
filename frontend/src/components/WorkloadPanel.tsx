@@ -409,6 +409,15 @@ export default function WorkloadPanel({
   const [prepullMsg, setPrepullMsg] = useState('')
   const [rates, setRates] = useState<Record<number, number>>({})
   const [history, setHistory] = useState<DataPoint[]>(() => initialHistory ?? [])
+  // If initialHistory arrives after first render (timing edge case), seed once
+  const seededRef = useRef(false)
+  useEffect(() => {
+    if (!seededRef.current && initialHistory && initialHistory.length > 0 && history.length === 0) {
+      seededRef.current = true
+      setHistory(initialHistory)
+      if (historyRef) historyRef.current = initialHistory
+    }
+  }, [initialHistory])
   const localRatesRef = useRef<Record<number, number>>({})
   const ratesRef = sharedRatesRef ?? localRatesRef
   const workloadsRef = useRef<WorkloadEntry[]>([])

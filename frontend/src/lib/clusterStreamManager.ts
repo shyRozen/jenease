@@ -123,6 +123,23 @@ export function detachStream(onData: Listener) {
   // Stream intentionally left running — kept alive for instant reconnect
 }
 
+/**
+ * Synchronously read current history for a cluster — safe to call during render.
+ * Returns null if the singleton is tracking a different cluster.
+ */
+export function getStreamHistory(clusterName: string): {
+  throughputHistory: ThroughputPoint[]
+  osdHistory: Record<string, OsdPoint[]>
+  lastData: IopsData | null
+} | null {
+  if (state.clusterName !== clusterName || !state.es) return null
+  return {
+    throughputHistory: state.throughputHistory,
+    osdHistory: state.osdHistory,
+    lastData: state.lastData,
+  }
+}
+
 /** Call on logout or page unload to clean up. */
 export function closeStream() {
   state.es?.close()

@@ -1,10 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
-import { useRef, useEffect, useState, useCallback } from 'react'
+import { useRef, useEffect, useState, useMemo, useCallback } from 'react'
 import { api } from '../api/client'
 import WorkloadPanel from '../components/WorkloadPanel'
 import ThroughputChart, { OSD_SERIES, type DataPoint } from '../components/ThroughputChart'
-import { attachStream, detachStream, type IopsData } from '../lib/clusterStreamManager'
+import { attachStream, detachStream, getStreamHistory, type IopsData, type OsdPoint } from '../lib/clusterStreamManager'
 
 // ── types ──────────────────────────────────────────────────────────────────
 
@@ -489,24 +489,27 @@ export default function ClusterDetail() {
 
   // SSE stream — singleton kept alive across navigation (no reconnect = no spike)
   const kubeconfigUrl = cluster?.kubeconfig_url
-  const [initialThroughputHistory, setInitialThroughputHistory] = useState<DataPoint[]>([])
+
+  // Read history synchronously during render so WorkloadPanel gets it on first mount,
+  // before any effect runs. useMemo re-runs only when the cluster name changes.
+  const streamHistory = useMemo(() => (name ? getStreamHistory(name) : null), [name])
+  const initialThroughputHistory = (streamHistory?.throughputHistory ?? []) as DataPoint[]
+
+  // Seed OSD per-chart history synchronously too (ref mutation is safe during render)
+  if (streamHistory && Object.keys(streamHistory.osdHistory).length > 0 &&
+      Object.keys(osdHistoryRef.current).length === 0) {
+    osdHistoryRef.current = Object.fromEntries(
+      Object.entries(streamHistory.osdHistory).map(([osd, pts]: [string, OsdPoint[]]) => [
+        osd,
+        pts.map(p => ({ ts: p.ts, total: p.total, rbd: 0, cephfs: 0, noobaa: 0, r: p.r, w: p.w } as unknown as DataPoint)),
+      ])
+    )
+  }
+
   const onIopsData = useCallback((data: IopsData) => setIopsData(data), [])
   useEffect(() => {
     if (!isClusterActive || !kubeconfigUrl) return
-    const { osdHistory, throughputHistory, lastData } = attachStream(name!, kubeconfigUrl, onIopsData)
-    // Seed OSD history from singleton so per-OSD charts show immediately on return
-    if (Object.keys(osdHistory).length > 0) {
-      osdHistoryRef.current = Object.fromEntries(
-        Object.entries(osdHistory).map(([osd, pts]) => [
-          osd,
-          pts.map(p => ({ ts: p.ts, total: p.total, rbd: 0, cephfs: 0, noobaa: 0, r: p.r, w: p.w } as unknown as DataPoint)),
-        ])
-      )
-    }
-    // Seed total throughput history so WorkloadPanel chart shows history on return
-    if (throughputHistory.length > 0) {
-      setInitialThroughputHistory(throughputHistory as DataPoint[])
-    }
+    const { lastData } = attachStream(name!, kubeconfigUrl, onIopsData)
     if (lastData) setIopsData(lastData)
     return () => detachStream(onIopsData)
   }, [name, isClusterActive, kubeconfigUrl, onIopsData])

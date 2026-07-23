@@ -67,6 +67,62 @@ const state: {
   logCallbacks: new Map(),
 }
 
+// ── Persistence (sessionStorage) ─────────────────────────────────────────────
+
+const STORAGE_KEY = 'jenease_stream_v1'
+
+function persistState() {
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify({
+      clusterName:      state.clusterName,
+      kubeconfigUrl:    state.kubeconfigUrl,
+      throughputHistory: state.throughputHistory,
+      osdHistory:       state.osdHistory,
+      holdlastRates:    state.holdlastRates,
+      holdlastByType:   state.holdlastByType,
+      logClusterName:   state.logClusterName,
+      logActiveIds:     state.logActiveIds,
+      logLines:         state.logLines,
+      logRates:         state.logRates,
+    }))
+  } catch {}
+}
+
+function restoreState() {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY)
+    if (!raw) return
+    const d = JSON.parse(raw)
+    const cutoff = Date.now() - 5 * 60 * 1000
+    state.clusterName      = d.clusterName      ?? ''
+    state.kubeconfigUrl    = d.kubeconfigUrl     ?? ''
+    state.throughputHistory = d.throughputHistory ?? []
+    state.osdHistory       = d.osdHistory        ?? {}
+    state.holdlastRates    = d.holdlastRates     ?? {}
+    state.holdlastByType   = d.holdlastByType    ?? { rbd: 0, cephfs: 0, noobaa: 0 }
+    state.logClusterName   = d.logClusterName    ?? ''
+    state.logActiveIds     = d.logActiveIds      ?? ''
+    state.logRates         = d.logRates          ?? {}
+    if (d.logLines) {
+      for (const [id, lines] of Object.entries(d.logLines as Record<string, LogLine[]>)) {
+        const fresh = lines.filter(l => l.ts > cutoff)
+        if (fresh.length) state.logLines[Number(id)] = fresh
+      }
+    }
+  } catch {}
+}
+
+restoreState()
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', persistState)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') persistState()
+  })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function parseRateMb(rateStr: string): number | null {
   const m = rateStr.match(/^([\d.]+)\s*(MiB|MB|KiB|KB|GiB|GB)\/s/)
   if (!m) return null
@@ -75,22 +131,24 @@ function parseRateMb(rateStr: string): number | null {
   return unit.startsWith('K') ? val / 1024 : unit.startsWith('G') ? val * 1024 : val
 }
 
-function openStream(clusterName: string, kubeconfigUrl: string) {
-  state.clusterName      = clusterName
-  state.kubeconfigUrl    = kubeconfigUrl
-  state.osdHistory       = {}
-  state.throughputHistory = []
-  state.lastData         = null
-  state.holdlastRates    = {}
-  state.holdlastByType   = { rbd: 0, cephfs: 0, noobaa: 0 }
-  // Clear log state on cluster change
-  state.logEs?.close()
-  state.logEs         = null
-  state.logClusterName = ''
-  state.logActiveIds  = ''
-  state.logLines      = {}
-  state.logRates      = {}
-  state.logCallbacks.clear()
+// keepHistory=true: same cluster reconnecting (refresh) — preserve buffered data
+function openStream(clusterName: string, kubeconfigUrl: string, keepHistory = false) {
+  state.clusterName   = clusterName
+  state.kubeconfigUrl = kubeconfigUrl
+  if (!keepHistory) {
+    state.osdHistory       = {}
+    state.throughputHistory = []
+    state.lastData         = null
+    state.holdlastRates    = {}
+    state.holdlastByType   = { rbd: 0, cephfs: 0, noobaa: 0 }
+    state.logEs?.close()
+    state.logEs          = null
+    state.logClusterName = ''
+    state.logActiveIds   = ''
+    state.logLines       = {}
+    state.logRates       = {}
+    state.logCallbacks.clear()
+  }
 
   const url = `/api/clusters/${clusterName}/iops/stream?kubeconfig_url=${encodeURIComponent(kubeconfigUrl)}`
   const es  = new EventSource(url, { withCredentials: true })
@@ -141,7 +199,7 @@ export function attachStream(
 
   if (!sameCluster || streamDead) {
     state.es?.close()
-    openStream(clusterName, kubeconfigUrl)
+    openStream(clusterName, kubeconfigUrl, sameCluster)  // keep history if same cluster (refresh)
   }
 
   state.listeners.add(onData)
@@ -252,8 +310,9 @@ export function getLogState(clusterName: string): {
   return { logLines: state.logLines, logRates: state.logRates }
 }
 
-/** Call on logout to clean up both streams. */
+/** Call on logout to clean up both streams and wipe persisted state. */
 export function closeStream() {
+  try { sessionStorage.removeItem(STORAGE_KEY) } catch {}
   state.es?.close()
   state.es = null
   state.clusterName = ''

@@ -22,14 +22,25 @@ export type IopsData = {
 
 export type OsdPoint = { ts: number; r: number; w: number; total: number }
 
+// Matches ThroughputChart's DataPoint (avoid circular import)
+export type ThroughputPoint = {
+  ts: number; total: number
+  rbd: number; cephfs: number; noobaa: number
+  ceph_r?: number; ceph_w?: number
+  [key: string]: number | undefined
+}
+
 type Listener = (data: IopsData) => void
 
 const state: {
   clusterName: string
   kubeconfigUrl: string
   es: EventSource | null
-  // Per-OSD history — last 720 points (~24 min at 2s)
   osdHistory: Record<string, OsdPoint[]>
+  // Total throughput history — last 300 points (~10 min at 2s)
+  // Workload breakdown (rbd/cephfs/noobaa) is 0 while user is away;
+  // total reflects real Ceph I/O the whole time.
+  throughputHistory: ThroughputPoint[]
   lastData: IopsData | null
   listeners: Set<Listener>
 } = {
@@ -37,15 +48,17 @@ const state: {
   kubeconfigUrl: '',
   es: null,
   osdHistory: {},
+  throughputHistory: [],
   lastData: null,
   listeners: new Set(),
 }
 
 function openStream(clusterName: string, kubeconfigUrl: string) {
-  state.clusterName  = clusterName
-  state.kubeconfigUrl = kubeconfigUrl
-  state.osdHistory   = {}
-  state.lastData     = null
+  state.clusterName      = clusterName
+  state.kubeconfigUrl    = kubeconfigUrl
+  state.osdHistory       = {}
+  state.throughputHistory = []
+  state.lastData         = null
 
   const url = `/api/clusters/${clusterName}/iops/stream?kubeconfig_url=${encodeURIComponent(kubeconfigUrl)}`
   const es  = new EventSource(url, { withCredentials: true })
@@ -61,12 +74,20 @@ function openStream(clusterName: string, kubeconfigUrl: string) {
         ...Object.keys(data.osd_throughput_mb ?? {}),
         ...Object.keys(data.osd_iops ?? {}),
       ])
+      let totalR = 0, totalW = 0
       for (const osd of osds) {
         const mb = data.osd_throughput_mb?.[osd]
         const r = mb?.r ?? 0, w = mb?.w ?? 0
+        totalR += r; totalW += w
         const prev = state.osdHistory[osd] ?? []
         state.osdHistory[osd] = [...prev.slice(-720), { ts: now, r, w, total: r + w }]
       }
+
+      // Accumulate total throughput history (workload breakdown stays 0 while user is away)
+      state.throughputHistory = [
+        ...state.throughputHistory.slice(-300),
+        { ts: now, total: totalR + totalW, rbd: 0, cephfs: 0, noobaa: 0, ceph_r: totalR, ceph_w: totalW },
+      ]
 
       state.listeners.forEach(fn => fn(data))
     } catch {}
@@ -84,7 +105,7 @@ export function attachStream(
   clusterName: string,
   kubeconfigUrl: string,
   onData: Listener,
-): { osdHistory: Record<string, OsdPoint[]>; lastData: IopsData | null } {
+): { osdHistory: Record<string, OsdPoint[]>; throughputHistory: ThroughputPoint[]; lastData: IopsData | null } {
   const sameCluster = state.clusterName === clusterName && state.kubeconfigUrl === kubeconfigUrl
   const streamDead  = !state.es || state.es.readyState === EventSource.CLOSED
 
@@ -94,7 +115,7 @@ export function attachStream(
   }
 
   state.listeners.add(onData)
-  return { osdHistory: state.osdHistory, lastData: state.lastData }
+  return { osdHistory: state.osdHistory, throughputHistory: state.throughputHistory, lastData: state.lastData }
 }
 
 export function detachStream(onData: Listener) {
@@ -108,6 +129,7 @@ export function closeStream() {
   state.es = null
   state.clusterName = ''
   state.osdHistory = {}
+  state.throughputHistory = []
   state.lastData = null
   state.listeners.clear()
 }

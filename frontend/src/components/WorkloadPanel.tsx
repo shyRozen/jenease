@@ -318,6 +318,7 @@ export default function WorkloadPanel({
   cephAgg,
   historyRef,
   poolBreakdown,
+  initialHistory,
 }: {
   clusterName: string
   kubeconfigUrl?: string
@@ -327,6 +328,7 @@ export default function WorkloadPanel({
   cephAgg?: { r: number; w: number }
   poolBreakdown?: { rbd: number; cephfs: number; noobaa: number }
   historyRef?: React.MutableRefObject<DataPoint[]>
+  initialHistory?: DataPoint[]
 }) {
   const queryClient = useQueryClient()
 
@@ -406,7 +408,7 @@ export default function WorkloadPanel({
   const [prepulling, setPrepulling] = useState(false)
   const [prepullMsg, setPrepullMsg] = useState('')
   const [rates, setRates] = useState<Record<number, number>>({})
-  const [history, setHistory] = useState<DataPoint[]>([])
+  const [history, setHistory] = useState<DataPoint[]>(() => initialHistory ?? [])
   const localRatesRef = useRef<Record<number, number>>({})
   const ratesRef = sharedRatesRef ?? localRatesRef
   const workloadsRef = useRef<WorkloadEntry[]>([])

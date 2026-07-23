@@ -489,11 +489,12 @@ export default function ClusterDetail() {
 
   // SSE stream — singleton kept alive across navigation (no reconnect = no spike)
   const kubeconfigUrl = cluster?.kubeconfig_url
+  const [initialThroughputHistory, setInitialThroughputHistory] = useState<DataPoint[]>([])
   const onIopsData = useCallback((data: IopsData) => setIopsData(data), [])
   useEffect(() => {
     if (!isClusterActive || !kubeconfigUrl) return
-    const { osdHistory, lastData } = attachStream(name!, kubeconfigUrl, onIopsData)
-    // Seed OSD history from singleton so charts show immediately on return
+    const { osdHistory, throughputHistory, lastData } = attachStream(name!, kubeconfigUrl, onIopsData)
+    // Seed OSD history from singleton so per-OSD charts show immediately on return
     if (Object.keys(osdHistory).length > 0) {
       osdHistoryRef.current = Object.fromEntries(
         Object.entries(osdHistory).map(([osd, pts]) => [
@@ -501,6 +502,10 @@ export default function ClusterDetail() {
           pts.map(p => ({ ts: p.ts, total: p.total, rbd: 0, cephfs: 0, noobaa: 0, r: p.r, w: p.w } as unknown as DataPoint)),
         ])
       )
+    }
+    // Seed total throughput history so WorkloadPanel chart shows history on return
+    if (throughputHistory.length > 0) {
+      setInitialThroughputHistory(throughputHistory as DataPoint[])
     }
     if (lastData) setIopsData(lastData)
     return () => detachStream(onIopsData)
@@ -740,6 +745,7 @@ export default function ClusterDetail() {
                   showLauncher={false}
                   sharedRatesRef={isOwner ? sharedRatesRef : undefined}
                   cephAgg={cephAgg}
+                  initialHistory={initialThroughputHistory}
                 />
 
               </div>

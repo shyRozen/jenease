@@ -490,10 +490,11 @@ export default function WorkloadPanel({
       const cephfs = fioTotal > 0 ? byType.cephfs : last.cephfs
       const noobaa = fioTotal > 0 ? byType.noobaa : last.noobaa
       // When no fio output yet (reconnecting / pods waiting for input):
-      // use OSD aggregate — same source as singleton uses while off-page.
+      // use holdlast breakdown sum so all lines are consistent with each other.
+      // Fall back to OSD aggregate only when holdlast is empty (no history yet).
       const total = fioTotal > 0
         ? fioTotal
-        : (cephAggRef.current.r + cephAggRef.current.w) || (rbd + cephfs + noobaa)
+        : (rbd + cephfs + noobaa) || (cephAggRef.current.r + cephAggRef.current.w)
       const now = Date.now()
       setHistory(prev => {
         const next = [...prev.slice(-600), {

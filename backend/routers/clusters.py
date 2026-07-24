@@ -118,7 +118,7 @@ async def active_clusters(session: dict = Depends(get_session)):
     # Fetch deploy + destroy builds concurrently
     deploy_builds, destroy_builds = await asyncio.gather(
         jenkins.get_job_builds(DEPLOY_JOB, limit=200),
-        jenkins.get_job_builds(DESTROY_JOB, limit=100),
+        jenkins.get_job_builds(DESTROY_JOB, limit=500),
     )
 
     # Classify destroy builds into three buckets:
@@ -239,6 +239,43 @@ async def active_clusters(session: dict = Depends(get_session)):
     return sorted(results, key=lambda x: x.get("timestamp") or 0, reverse=True)
 
 
+@router.get("/destroy-log")
+async def destroy_log(session: dict = Depends(get_session)):
+    """Diagnostic: show what qe-destroy-ocs-cluster has cleaned up recently."""
+    jenkins = _make_client(session)
+    destroy_builds = await jenkins.get_job_builds(DESTROY_JOB, limit=500)
+
+    # Enrich builds with no description
+    no_desc = [b for b in destroy_builds if not _cluster_name_from_desc(b.get("description", "") or "")]
+    if no_desc:
+        params_list = await asyncio.gather(*[
+            _get_build_params_safe(jenkins, DESTROY_JOB, b["number"])
+            for b in no_desc
+        ])
+        for build, params in zip(no_desc, params_list):
+            name = params.get("CLUSTER_NAME", "")
+            if name:
+                build["_cluster_name"] = name
+
+    rows = []
+    for b in destroy_builds:
+        name = _cluster_name_from_desc(b.get("description", "") or "") or b.get("_cluster_name", "")
+        ts = b.get("timestamp", 0)
+        rows.append({
+            "build_num": b["number"],
+            "cluster_name": name or "—",
+            "result": b.get("result") or ("building" if b.get("building") else "unknown"),
+            "timestamp": ts,
+            "build_url": f"{settings.jenkins_url}/job/{DESTROY_JOB}/{b['number']}/",
+        })
+
+    return {
+        "destroy_job": DESTROY_JOB,
+        "total_builds_fetched": len(destroy_builds),
+        "builds": rows,
+    }
+
+
 @router.get("/all")
 async def all_clusters(session: dict = Depends(get_session)):
     """All active clusters across all users (no username filter)."""
@@ -247,7 +284,7 @@ async def all_clusters(session: dict = Depends(get_session)):
     deploy_builds, prod_builds, destroy_builds = await asyncio.gather(
         jenkins.get_job_builds(DEPLOY_JOB, limit=200),
         jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=200, include_causes=True),
-        jenkins.get_job_builds(DESTROY_JOB, limit=100),
+        jenkins.get_job_builds(DESTROY_JOB, limit=500),
     )
 
     # Classify destroy builds (same logic as active_clusters)

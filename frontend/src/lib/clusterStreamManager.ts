@@ -257,6 +257,16 @@ export function setLogStream(clusterName: string, activeIds: string) {
   state.logClusterName = clusterName
   state.logActiveIds   = activeIds
 
+  // Evict log lines and rates for IDs no longer in the active set so stale
+  // data from previous runs doesn't appear as [hist] in new workload terminals.
+  const activeSet = new Set(activeIds.split(',').filter(Boolean).map(Number))
+  for (const id of Object.keys(state.logLines).map(Number)) {
+    if (!activeSet.has(id)) delete state.logLines[id]
+  }
+  for (const id of Object.keys(state.logRates).map(Number)) {
+    if (!activeSet.has(id)) delete state.logRates[id]
+  }
+
   if (!activeIds) { state.logEs = null; return }
 
   const url = `/api/clusters/${clusterName}/workloads/logs/multi?ids=${activeIds}`

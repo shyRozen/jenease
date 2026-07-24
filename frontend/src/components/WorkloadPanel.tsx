@@ -505,7 +505,10 @@ export default function WorkloadPanel({
       // Only use holdlast when there are active holdlast entries (pods mid-reconnect).
       // When holdlastRatesRef is empty (all rates explicitly cleared = workloads done),
       // fall through to zero so the chart drops correctly.
-      const holdlastActive = Object.keys(holdlastRatesRef.current).length > 0
+      // Only use holdlast when the stored IDs match CURRENT workloads —
+      // prevents old-run rates from showing during new workload startup.
+      const currentIds = new Set(workloadsRef.current.map(w => w.id))
+      const holdlastActive = Object.keys(holdlastRatesRef.current).some(id => currentIds.has(Number(id)))
       const last = holdlastActive ? lastByTypeRef.current : { rbd: 0, cephfs: 0, noobaa: 0 }
       const rbd    = fioTotal > 0 ? byType.rbd    : last.rbd
       const cephfs = fioTotal > 0 ? byType.cephfs : last.cephfs

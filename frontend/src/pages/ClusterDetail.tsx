@@ -426,6 +426,9 @@ export default function ClusterDetail() {
   const workloadHistoryRef = useRef<DataPoint[]>([])
   // Current OSD aggregate totals (for text readout + WorkloadPanel R/W toggle)
   const [cephAgg, setCephAgg] = useState<{r: number, w: number}>({r: 0, w: 0})
+  const [poolBreakdown, setPoolBreakdown] = useState<{rbd: number; cephfs: number; noobaa: number}>(
+    () => (name ? getStreamHistory(name)?.poolBreakdown : undefined) ?? { rbd: 0, cephfs: 0, noobaa: 0 }
+  )
   const [osdGridWidth, setOsdGridWidth] = useState(0)
   const osdGridRef = useRef<HTMLDivElement>(null)
   const [, forceRender] = useState(0)
@@ -459,6 +462,14 @@ export default function ClusterDetail() {
     }
 
     setCephAgg({ r: totalR, w: totalW })
+    const pool = iopsData.pool_throughput_mb as Record<string, { r?: number; w?: number }> | undefined
+    if (pool) {
+      setPoolBreakdown({
+        rbd:    (pool.rbd?.r    ?? 0) + (pool.rbd?.w    ?? 0),
+        cephfs: (pool.cephfs?.r ?? 0) + (pool.cephfs?.w ?? 0),
+        noobaa: (pool.noobaa?.r ?? 0) + (pool.noobaa?.w ?? 0),
+      })
+    }
     if (knownOsds.size > 0) forceRender(v => v + 1)
   }, [iopsData])
 
@@ -760,6 +771,7 @@ export default function ClusterDetail() {
                   showLauncher={false}
                   sharedRatesRef={isOwner ? sharedRatesRef : undefined}
                   cephAgg={cephAgg}
+                  poolBreakdown={poolBreakdown}
                   initialHistory={initialThroughputHistory}
                 />
 
@@ -773,6 +785,7 @@ export default function ClusterDetail() {
                     showList={false}
                     sharedRatesRef={sharedRatesRef}
                     cephAgg={cephAgg}
+                    poolBreakdown={poolBreakdown}
                   />
                 </div>
               )}

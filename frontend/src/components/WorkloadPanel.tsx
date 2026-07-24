@@ -509,13 +509,11 @@ export default function WorkloadPanel({
       // prevents old-run rates from showing during new workload startup.
       const currentIds = new Set(workloadsRef.current.map(w => w.id))
       const holdlastActive = Object.keys(holdlastRatesRef.current).some(id => currentIds.has(Number(id)))
-      const last = holdlastActive ? lastByTypeRef.current : { rbd: 0, cephfs: 0, noobaa: 0 }
+      // Priority: fio rates > holdlast (nav-back) > pool stats (always-on Ceph data)
+      const last = holdlastActive ? lastByTypeRef.current : poolBreakdownRef.current
       const rbd    = fioTotal > 0 ? byType.rbd    : last.rbd
       const cephfs = fioTotal > 0 ? byType.cephfs : last.cephfs
       const noobaa = fioTotal > 0 ? byType.noobaa : last.noobaa
-      // When no fio output yet (reconnecting / pods waiting for input):
-      // use holdlast breakdown sum so all lines are consistent with each other.
-      // Fall back to OSD aggregate only when holdlast is empty (no history yet).
       const total = fioTotal > 0
         ? fioTotal
         : (rbd + cephfs + noobaa) || (cephAggRef.current.r + cephAggRef.current.w)

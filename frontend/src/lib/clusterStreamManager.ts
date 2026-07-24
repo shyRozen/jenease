@@ -41,6 +41,7 @@ const state: {
   lastData: IopsData | null
   holdlastRates: Record<number, number>
   holdlastByType: { rbd: number; cephfs: number; noobaa: number }
+  poolBreakdown: { rbd: number; cephfs: number; noobaa: number }
   listeners: Set<Listener>
   // ── Log stream ───────────────────────────────────────────────────────────────
   logEs: EventSource | null
@@ -58,6 +59,7 @@ const state: {
   lastData: null,
   holdlastRates: {},
   holdlastByType: { rbd: 0, cephfs: 0, noobaa: 0 },
+  poolBreakdown: { rbd: 0, cephfs: 0, noobaa: 0 },
   listeners: new Set(),
   logEs: null,
   logClusterName: '',
@@ -173,6 +175,16 @@ function openStream(clusterName: string, kubeconfigUrl: string, keepHistory = fa
         state.osdHistory[osd] = [...prev.slice(-720), { ts: now, r, w, total: r + w }]
       }
 
+      // Pool breakdown — backend already maps pool names → rbd/cephfs/noobaa
+      const pool = data.pool_throughput_mb as Record<string, { r?: number; w?: number }> | undefined
+      if (pool) {
+        state.poolBreakdown = {
+          rbd:    (pool.rbd?.r    ?? 0) + (pool.rbd?.w    ?? 0),
+          cephfs: (pool.cephfs?.r ?? 0) + (pool.cephfs?.w ?? 0),
+          noobaa: (pool.noobaa?.r ?? 0) + (pool.noobaa?.w ?? 0),
+        }
+      }
+
       state.throughputHistory = [
         ...state.throughputHistory.slice(-300),
         { ts: now, total: totalR + totalW, rbd: 0, cephfs: 0, noobaa: 0, ceph_r: totalR, ceph_w: totalW },
@@ -221,6 +233,7 @@ export function getStreamHistory(clusterName: string): {
   lastData: IopsData | null
   holdlastRates: Record<number, number>
   holdlastByType: { rbd: number; cephfs: number; noobaa: number }
+  poolBreakdown: { rbd: number; cephfs: number; noobaa: number }
 } | null {
   if (state.clusterName !== clusterName || !state.es) return null
   return {
@@ -229,6 +242,7 @@ export function getStreamHistory(clusterName: string): {
     lastData: state.lastData,
     holdlastRates: state.holdlastRates,
     holdlastByType: state.holdlastByType,
+    poolBreakdown: state.poolBreakdown,
   }
 }
 

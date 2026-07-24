@@ -12,6 +12,8 @@ interface ClusterEntry {
   owner: string
   build_num: number
   build_url: string
+  source_job?: string
+  source_build_url?: string
   building: boolean
   result: string | null
   timestamp: number | null
@@ -289,6 +291,13 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
             className="text-[10px] font-mono text-text-muted hover:text-accent-cyan transition-colors">
             Jenkins #{c.build_num}↗
           </a>
+          {c.source_job && c.source_job !== 'qe-deploy-ocs-cluster' && c.source_build_url && (
+            <a href={c.source_build_url} target="_blank" rel="noreferrer"
+              className="text-[10px] font-mono text-accent-amber/80 hover:text-accent-amber transition-colors truncate max-w-[220px]"
+              title={c.source_job}>
+              ⚙ {c.source_job.replace('qe-trigger-', '').replace('-deployment', '')}↗
+            </a>
+          )}
           {(c.destroying || c.destroy_failed) && c.destroy_build_url && (
             <a href={c.destroy_build_url} target="_blank" rel="noreferrer"
               className="text-[10px] font-mono text-accent-red hover:brightness-125 transition-colors">

@@ -1,6 +1,7 @@
 import asyncio
 import html as _html_mod
 import re
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -18,6 +19,25 @@ router = APIRouter(prefix="/api/clusters", tags=["clusters"])
 
 DEPLOY_JOB  = "qe-deploy-ocs-cluster"
 DESTROY_JOB = "qe-destroy-ocs-cluster"
+
+# Cache of all qe-trigger-*-deployment job names — refreshed hourly
+_trigger_jobs_cache: list[str] = []
+_trigger_jobs_ts: float = 0.0
+
+async def _get_trigger_jobs(jenkins: JenkinsClient) -> list[str]:
+    global _trigger_jobs_cache, _trigger_jobs_ts
+    if _trigger_jobs_cache and time.time() - _trigger_jobs_ts < 3600:
+        return _trigger_jobs_cache
+    try:
+        all_jobs = await jenkins.get_all_jobs()
+        _trigger_jobs_cache = sorted(
+            j["name"] for j in all_jobs
+            if j["name"].startswith("qe-trigger-") and j["name"].endswith("-deployment")
+        )
+        _trigger_jobs_ts = time.time()
+    except Exception:
+        pass
+    return _trigger_jobs_cache
 
 LOCKER_URL = "https://odf-resourcelocker.apps.int.spoke.prod.us-east-1.aws.paas.redhat.com/pendingrequests/"
 
@@ -227,10 +247,21 @@ async def all_clusters(session: dict = Depends(get_session)):
     """All active clusters across all users (no username filter)."""
     jenkins = _make_client(session)
 
-    deploy_builds, destroy_builds = await asyncio.gather(
+    # Fetch trigger job list alongside the standard deploy/destroy fetches
+    trigger_job_names = await _get_trigger_jobs(jenkins)
+
+    results_list = await asyncio.gather(
         jenkins.get_job_builds(DEPLOY_JOB, limit=200),
         jenkins.get_job_builds(DESTROY_JOB, limit=100),
+        *[jenkins.get_job_builds(j, limit=5) for j in trigger_job_names],
+        return_exceptions=True,
     )
+    deploy_builds  = results_list[0] if not isinstance(results_list[0], Exception) else []
+    destroy_builds = results_list[1] if not isinstance(results_list[1], Exception) else []
+    trigger_build_lists = {
+        job: (bl if not isinstance(bl, Exception) else [])
+        for job, bl in zip(trigger_job_names, results_list[2:])
+    }
 
     # Classify destroy builds (same logic as active_clusters)
     destroy_no_desc = [
@@ -267,7 +298,7 @@ async def all_clusters(session: dict = Depends(get_session)):
             if ts > failed_destroys.get(name, {}).get("timestamp", 0):
                 failed_destroys[name] = {"build_num": b["number"], "build_url": build_url, "timestamp": ts}
 
-    # Enrich building builds with no description (all users)
+    # Enrich building builds with no description (all users) — deploy job
     building_no_desc = [
         b for b in deploy_builds
         if b.get("building") and not _cluster_name_from_desc(b.get("description", "") or "")
@@ -282,8 +313,28 @@ async def all_clusters(session: dict = Depends(get_session)):
             if name:
                 build["_param_cluster_name"] = name
 
+    # Enrich trigger builds that have no description yet
+    trigger_no_desc = [
+        (job, b)
+        for job, builds in trigger_build_lists.items()
+        for b in builds
+        if (b.get("building") or b.get("result") == "FAILURE")
+        and not _cluster_name_from_desc(b.get("description", "") or "")
+    ]
+    if trigger_no_desc:
+        trigger_params = await asyncio.gather(*[
+            _get_build_params_safe(jenkins, job, b["number"])
+            for job, b in trigger_no_desc
+        ])
+        for (job, build), params in zip(trigger_no_desc, trigger_params):
+            name = params.get("CLUSTER_NAME", "")
+            if name:
+                build["_param_cluster_name"] = name
+
     # Collect all clusters (no username filter)
     seen: dict[str, dict] = {}
+
+    # Source 1: standard deploy job
     for build in deploy_builds:
         desc = build.get("description", "") or ""
         cluster_name = _cluster_name_from_desc(desc) or build.get("_param_cluster_name")
@@ -294,7 +345,35 @@ async def all_clusters(session: dict = Depends(get_session)):
             continue
         if cluster_name not in seen or build["number"] > seen[cluster_name]["number"]:
             parsed = JenkinsClient.parse_build_description(desc)
-            seen[cluster_name] = {**build, **parsed, "cluster_name": cluster_name}
+            seen[cluster_name] = {**build, **parsed, "cluster_name": cluster_name, "_source_job": DEPLOY_JOB}
+
+    # Source 2: qe-trigger-*-deployment jobs (running = deploying/testing, FAILURE = kept for debug)
+    seven_days_ms = 7 * 24 * 3600 * 1000
+    now_ms = int(time.time() * 1000)
+    for job, builds in trigger_build_lists.items():
+        for build in builds:
+            is_running = build.get("building")
+            is_failed  = build.get("result") == "FAILURE"
+            if not is_running and not is_failed:
+                continue
+            # Skip very old failures (> 7 days) — likely already cleaned up
+            if is_failed and (now_ms - (build.get("timestamp") or 0)) > seven_days_ms:
+                continue
+            desc = build.get("description", "") or ""
+            cluster_name = _cluster_name_from_desc(desc) or build.get("_param_cluster_name")
+            if not cluster_name:
+                continue
+            deploy_ts = build.get("timestamp", 0)
+            if not is_running and successful_destroys.get(cluster_name, 0) > deploy_ts:
+                continue
+            if cluster_name not in seen or build["number"] > seen[cluster_name].get("number", 0):
+                parsed = JenkinsClient.parse_build_description(desc)
+                seen[cluster_name] = {
+                    **build, **parsed,
+                    "cluster_name": cluster_name,
+                    "_source_job": job,
+                    "_source_build_url": f"{settings.jenkins_url}/job/{job}/{build['number']}/",
+                }
 
     if not seen:
         return []
@@ -302,7 +381,8 @@ async def all_clusters(session: dict = Depends(get_session)):
     import re as _re
 
     async def enrich_all(info: dict) -> dict:
-        params = await _get_build_params_safe(jenkins, DEPLOY_JOB, info["number"])
+        source_job = info.get("_source_job", DEPLOY_JOB)
+        params = await _get_build_params_safe(jenkins, source_job, info["number"])
         cname = info["cluster_name"]
         platform_conf = params.get("FULL_PLATFORM_CONF") or params.get("CLUSTER_CONF") or ""
         masters, workers = _parse_topology(platform_conf)
@@ -313,7 +393,9 @@ async def all_clusters(session: dict = Depends(get_session)):
             "cluster_name": cname,
             "owner": owner,
             "build_num": info["number"],
-            "build_url": f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{info['number']}/",
+            "build_url": info.get("_source_build_url") or f"{settings.jenkins_url}/job/{source_job}/{info['number']}/",
+            "source_job": source_job,
+            "source_build_url": info.get("_source_build_url", ""),
             "building": info.get("building", False),
             "result": info.get("result"),
             "timestamp": info.get("timestamp"),

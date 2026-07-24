@@ -175,19 +175,27 @@ function openStream(clusterName: string, kubeconfigUrl: string, keepHistory = fa
         state.osdHistory[osd] = [...prev.slice(-720), { ts: now, r, w, total: r + w }]
       }
 
-      // Pool breakdown — backend already maps pool names → rbd/cephfs/noobaa
+      // Pool breakdown — backend maps pool names → rbd/cephfs/noobaa at CLIENT scale.
+      // OSD aggregate (totalR+totalW) is at REPLICA scale (3× for 3-replica).
+      // Store pool stats directly in throughputHistory so history has correct breakdown
+      // at the right scale — no scaling needed, avoids spike amplification.
       const pool = data.pool_throughput_mb as Record<string, { r?: number; w?: number }> | undefined
+      const pRbd    = (pool?.rbd?.r    ?? 0) + (pool?.rbd?.w    ?? 0)
+      const pCephfs = (pool?.cephfs?.r ?? 0) + (pool?.cephfs?.w ?? 0)
+      const pNoobaa = (pool?.noobaa?.r ?? 0) + (pool?.noobaa?.w ?? 0)
+      const pTotal  = pRbd + pCephfs + pNoobaa
       if (pool) {
-        state.poolBreakdown = {
-          rbd:    (pool.rbd?.r    ?? 0) + (pool.rbd?.w    ?? 0),
-          cephfs: (pool.cephfs?.r ?? 0) + (pool.cephfs?.w ?? 0),
-          noobaa: (pool.noobaa?.r ?? 0) + (pool.noobaa?.w ?? 0),
-        }
+        state.poolBreakdown = { rbd: pRbd, cephfs: pCephfs, noobaa: pNoobaa }
       }
 
       state.throughputHistory = [
         ...state.throughputHistory.slice(-300),
-        { ts: now, total: totalR + totalW, rbd: 0, cephfs: 0, noobaa: 0, ceph_r: totalR, ceph_w: totalW },
+        {
+          ts: now,
+          total: pTotal || (totalR + totalW),  // pool total preferred (client scale)
+          rbd: pRbd, cephfs: pCephfs, noobaa: pNoobaa,
+          ceph_r: totalR, ceph_w: totalW,
+        },
       ]
 
       state.listeners.forEach(fn => fn(data))

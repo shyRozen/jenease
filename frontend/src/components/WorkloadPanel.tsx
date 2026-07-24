@@ -6,6 +6,7 @@ import SessionReplayModal, { type SessionFull, type SessionEvent } from './Sessi
 import {
   getStreamHistory, updateHoldlast, updateHoldlastByType,
   setLogStream, registerLogCallback as singletonRegisterLogCallback, getLogState,
+  lockThroughputHistory, unlockThroughputHistory, pushThroughputPoint,
   type LogLine,
 } from '../lib/clusterStreamManager'
 
@@ -518,13 +519,10 @@ export default function WorkloadPanel({
         ? fioTotal
         : (rbd + cephfs + noobaa) || (cephAggRef.current.r + cephAggRef.current.w)
       const now = Date.now()
+      const pt = { ts: now, total, rbd, cephfs, noobaa, ceph_r: cephAggRef.current.r, ceph_w: cephAggRef.current.w }
+      if (showList) pushThroughputPoint(clusterName, pt)
       setHistory(prev => {
-        const next = [...prev.slice(-600), {
-          ts: now, total,
-          rbd, cephfs, noobaa,
-          ceph_r: cephAggRef.current.r,
-          ceph_w: cephAggRef.current.w,
-        }]
+        const next = [...prev.slice(-600), pt]
         if (historyRef) historyRef.current = next
         return next
       })
@@ -562,6 +560,14 @@ export default function WorkloadPanel({
   function isCollapsed(id: number) { return id in cardOverrides ? cardOverrides[id] : allCollapsed }
   function toggleCard(id: number) { setCardOverrides(p => ({ ...p, [id]: !isCollapsed(id) })) }
   function toggleAll() { setAllCollapsed(p => !p); setCardOverrides({}) }
+
+  // While this panel is mounted, write fio-rate history into the singleton so
+  // navigation-back seeds the smooth fio data, not spiky OSD pool stats.
+  useEffect(() => {
+    if (!showList) return
+    lockThroughputHistory(clusterName)
+    return () => unlockThroughputHistory(clusterName)
+  }, [clusterName, showList])
 
   // ── Multiplexed log SSE (singleton — stays alive across navigation) ─────────
   const activeIds = activeWorkloads.map(w => w.id).sort().join(',')

@@ -42,6 +42,7 @@ const state: {
   holdlastRates: Record<number, number>
   holdlastByType: { rbd: number; cephfs: number; noobaa: number }
   poolBreakdown: { rbd: number; cephfs: number; noobaa: number }
+  historyLocked: boolean   // true while WorkloadPanel is writing fio-rate history
   listeners: Set<Listener>
   // ── Log stream ───────────────────────────────────────────────────────────────
   logEs: EventSource | null
@@ -60,6 +61,7 @@ const state: {
   holdlastRates: {},
   holdlastByType: { rbd: 0, cephfs: 0, noobaa: 0 },
   poolBreakdown: { rbd: 0, cephfs: 0, noobaa: 0 },
+  historyLocked: false,
   listeners: new Set(),
   logEs: null,
   logClusterName: '',
@@ -143,6 +145,7 @@ function openStream(clusterName: string, kubeconfigUrl: string, keepHistory = fa
     state.lastData         = null
     state.holdlastRates    = {}
     state.holdlastByType   = { rbd: 0, cephfs: 0, noobaa: 0 }
+    state.historyLocked    = false
     state.logEs?.close()
     state.logEs          = null
     state.logClusterName = ''
@@ -188,15 +191,20 @@ function openStream(clusterName: string, kubeconfigUrl: string, keepHistory = fa
         state.poolBreakdown = { rbd: pRbd, cephfs: pCephfs, noobaa: pNoobaa }
       }
 
-      state.throughputHistory = [
-        ...state.throughputHistory.slice(-300),
-        {
-          ts: now,
-          total: pTotal || (totalR + totalW),  // pool total preferred (client scale)
-          rbd: pRbd, cephfs: pCephfs, noobaa: pNoobaa,
-          ceph_r: totalR, ceph_w: totalW,
-        },
-      ]
+      // Only write OSD history when WorkloadPanel is NOT mounted.
+      // While on the cluster page, WorkloadPanel pushes fio-rate points (smoother,
+      // 1s resolution). OSD pool stats are spikier — let fio win while visible.
+      if (!state.historyLocked) {
+        state.throughputHistory = [
+          ...state.throughputHistory.slice(-300),
+          {
+            ts: now,
+            total: pTotal || (totalR + totalW),
+            rbd: pRbd, cephfs: pCephfs, noobaa: pNoobaa,
+            ceph_r: totalR, ceph_w: totalW,
+          },
+        ]
+      }
 
       state.listeners.forEach(fn => fn(data))
     } catch {}
@@ -261,6 +269,17 @@ export function updateHoldlast(id: number, rate: number | null) {
 
 export function updateHoldlastByType(byType: { rbd: number; cephfs: number; noobaa: number }) {
   state.holdlastByType = { ...byType }
+}
+
+export function lockThroughputHistory(clusterName: string) {
+  if (state.clusterName === clusterName) state.historyLocked = true
+}
+export function unlockThroughputHistory(clusterName: string) {
+  if (state.clusterName === clusterName) state.historyLocked = false
+}
+export function pushThroughputPoint(clusterName: string, pt: ThroughputPoint) {
+  if (state.clusterName !== clusterName) return
+  state.throughputHistory = [...state.throughputHistory.slice(-600), pt]
 }
 
 // ── Log stream ────────────────────────────────────────────────────────────────
@@ -353,6 +372,7 @@ export function closeStream() {
   state.lastData = null
   state.holdlastRates = {}
   state.holdlastByType = { rbd: 0, cephfs: 0, noobaa: 0 }
+  state.historyLocked = false
   state.listeners.clear()
   state.logEs?.close()
   state.logEs = null

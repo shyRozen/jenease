@@ -60,9 +60,12 @@ class JenkinsClient:
             r.raise_for_status()
             return r.json()
 
-    async def get_job_builds(self, job: str, limit: int = 50) -> list[dict]:
+    async def get_job_builds(self, job: str, limit: int = 50, include_causes: bool = False) -> list[dict]:
         url    = f"{self.base}/job/{job}/api/json"
-        params = {"tree": f"builds[number,result,building,timestamp,description,duration]{{0,{limit}}}"}
+        fields = "number,result,building,timestamp,description,duration"
+        if include_causes:
+            fields += ",actions[causes[upstreamProject,upstreamBuild,upstreamUrl]]"
+        params = {"tree": f"builds[{fields}]{{0,{limit}}}"}
         async with self._client() as c:
             r = await c.get(url, params=params)
         if r.status_code == 200:

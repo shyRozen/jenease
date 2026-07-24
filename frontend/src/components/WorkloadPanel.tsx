@@ -489,35 +489,26 @@ export default function WorkloadPanel({
   useEffect(() => {
     const id = setInterval(() => {
       const byType: Record<string, number> = { rbd: 0, cephfs: 0, noobaa: 0 }
-      const hasLiveRates = workloadsRef.current.some(w => (ratesRef.current[w.id] ?? 0) > 0)
       for (const w of workloadsRef.current) {
-        // If no live rates yet (reconnecting / pods waiting for input), use holdlast
-        const r = hasLiveRates
-          ? (ratesRef.current[w.id] ?? 0)
-          : (holdlastRatesRef.current[w.id] ?? 0)
+        // Per-workload holdlast: if THIS workload has no live rate yet (just reconnected),
+        // use its individual holdlast. Prevents one slow workload from zeroing its type line
+        // while other workloads of different types are reporting correctly.
+        const live = ratesRef.current[w.id] ?? 0
+        const r = live > 0 ? live : (holdlastRatesRef.current[w.id] ?? 0)
         byType[w.workload_type] = (byType[w.workload_type] ?? 0) + r
       }
       const fioTotal = Object.values(byType).reduce((a, b) => a + b, 0)
       if (fioTotal > 0) {
-        // Save per-type breakdown to singleton so it survives navigation
         lastByTypeRef.current = { rbd: byType.rbd, cephfs: byType.cephfs, noobaa: byType.noobaa }
         updateHoldlastByType(lastByTypeRef.current)
       }
-      // Only use holdlast when there are active holdlast entries (pods mid-reconnect).
-      // When holdlastRatesRef is empty (all rates explicitly cleared = workloads done),
-      // fall through to zero so the chart drops correctly.
-      // Only use holdlast when the stored IDs match CURRENT workloads —
-      // prevents old-run rates from showing during new workload startup.
-      const currentIds = new Set(workloadsRef.current.map(w => w.id))
-      const holdlastActive = Object.keys(holdlastRatesRef.current).some(id => currentIds.has(Number(id)))
-      // Priority: fio rates > holdlast (nav-back) > pool stats (always-on Ceph data)
-      const last = holdlastActive ? lastByTypeRef.current : poolBreakdownRef.current
-      const rbd    = fioTotal > 0 ? byType.rbd    : last.rbd
-      const cephfs = fioTotal > 0 ? byType.cephfs : last.cephfs
-      const noobaa = fioTotal > 0 ? byType.noobaa : last.noobaa
-      const total = fioTotal > 0
-        ? fioTotal
-        : (rbd + cephfs + noobaa) || (cephAggRef.current.r + cephAggRef.current.w)
+      // When workloads list is loaded: byType is authoritative (per-workload holdlast covers gaps).
+      // When workloads list is still loading (empty): fall back to Ceph pool stats.
+      const fallback = poolBreakdownRef.current
+      const rbd    = workloadsRef.current.length > 0 ? byType.rbd    : fallback.rbd
+      const cephfs = workloadsRef.current.length > 0 ? byType.cephfs : fallback.cephfs
+      const noobaa = workloadsRef.current.length > 0 ? byType.noobaa : fallback.noobaa
+      const total  = (rbd + cephfs + noobaa) || (cephAggRef.current.r + cephAggRef.current.w)
       const now = Date.now()
       const pt = { ts: now, total, rbd, cephfs, noobaa, ceph_r: cephAggRef.current.r, ceph_w: cephAggRef.current.w }
       if (showList) pushThroughputPoint(clusterName, pt)

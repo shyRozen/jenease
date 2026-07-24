@@ -19,6 +19,7 @@ router = APIRouter(prefix="/api/clusters", tags=["clusters"])
 
 DEPLOY_JOB      = "qe-deploy-ocs-cluster"
 PROD_DEPLOY_JOB = "qe-deploy-ocs-cluster-prod"
+FDF_DEPLOY_JOB  = "qe-deploy-fdf-cluster"
 DESTROY_JOB     = "qe-destroy-ocs-cluster"
 
 
@@ -41,11 +42,15 @@ LOCKER_URL = "https://odf-resourcelocker.apps.int.spoke.prod.us-east-1.aws.paas.
 STAGE_SHORT: dict[str, str] = {
     "Initialization":                   "init",
     "Prepare Temporary Jenkins Slave":  "prepare_jslave",
-    "Install_OCP":                      "install_ocp",
-    "Install_OCS":                      "install_ocs",
     "External RHCS":                    "rhcs",
+    "Install_OCP":                      "install_ocp",
+    "Deploy EDR":                       "deploy_edr",
+    "Install_OCS":                      "install_ocs",
+    "Install_Fusion":                   "install_fusion",
+    "Install_FDF":                      "install_fdf",
     "Upgrade":                          "upgrade",
     "Test":                             "test",
+    "Lib Test":                         "lib_test",
     "Declarative: Post Actions":        "teardown",
 }
 
@@ -281,11 +286,14 @@ async def all_clusters(session: dict = Depends(get_session)):
     """All active clusters across all users (no username filter)."""
     jenkins = _make_client(session)
 
-    deploy_builds, prod_builds, destroy_builds = await asyncio.gather(
+    deploy_builds, prod_builds, fdf_builds, destroy_builds, locker = await asyncio.gather(
         jenkins.get_job_builds(DEPLOY_JOB, limit=200),
         jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=200, include_causes=True),
+        jenkins.get_job_builds(FDF_DEPLOY_JOB, limit=100, include_causes=True),
         jenkins.get_job_builds(DESTROY_JOB, limit=500),
+        _fetch_locker_queue(),
     )
+    locker_bare = {u.rstrip('/') for u in locker}
 
     # Classify destroy builds (same logic as active_clusters)
     destroy_no_desc = [
@@ -337,17 +345,27 @@ async def all_clusters(session: dict = Depends(get_session)):
             if name:
                 build["_param_cluster_name"] = name
 
-    # Enrich prod deploy builds with no description yet
+    # Enrich prod+FDF deploy builds with no description yet
+    jenkins_base = settings.jenkins_url.rstrip("/")
+
+    def _is_locker_active(build: dict, job: str) -> bool:
+        """True if this build holds a resource locker slot OR is currently building."""
+        if build.get("building"):
+            return True
+        url_bare = f"{jenkins_base}/job/{job}/{build['number']}"
+        return url_bare in locker_bare
+
+    prod_fdf = [(PROD_DEPLOY_JOB, b) for b in prod_builds] + [(FDF_DEPLOY_JOB, b) for b in fdf_builds]
     prod_no_desc = [
-        b for b in prod_builds
-        if b.get("building") and not _cluster_name_from_desc(b.get("description", "") or "")
+        (job, b) for job, b in prod_fdf
+        if _is_locker_active(b, job) and not _cluster_name_from_desc(b.get("description", "") or "")
     ]
     if prod_no_desc:
         prod_params_list = await asyncio.gather(*[
-            _get_build_params_safe(jenkins, PROD_DEPLOY_JOB, b["number"])
-            for b in prod_no_desc
+            _get_build_params_safe(jenkins, job, b["number"])
+            for job, b in prod_no_desc
         ])
-        for build, params in zip(prod_no_desc, prod_params_list):
+        for (job, build), params in zip(prod_no_desc, prod_params_list):
             name = params.get("CLUSTER_NAME", "")
             if name:
                 build["_param_cluster_name"] = name
@@ -368,14 +386,13 @@ async def all_clusters(session: dict = Depends(get_session)):
             parsed = JenkinsClient.parse_build_description(desc)
             seen[cluster_name] = {**build, **parsed, "cluster_name": cluster_name, "_source_job": DEPLOY_JOB}
 
-    # Source 2: prod deploy job — extract upstream trigger job from cause chain
-    for build in prod_builds:
+    # Source 2: prod + FDF deploy jobs — locker is the source of truth for "alive"
+    for job, build in prod_fdf:
+        if not _is_locker_active(build, job):
+            continue  # not in locker and not building → already destroyed/done
         desc = build.get("description", "") or ""
         cluster_name = _cluster_name_from_desc(desc) or build.get("_param_cluster_name")
         if not cluster_name:
-            continue
-        deploy_ts = build.get("timestamp", 0)
-        if not build.get("building") and successful_destroys.get(cluster_name, 0) > deploy_ts:
             continue
         if cluster_name not in seen or build["number"] > seen[cluster_name].get("number", 0):
             parsed = JenkinsClient.parse_build_description(desc)
@@ -383,7 +400,7 @@ async def all_clusters(session: dict = Depends(get_session)):
             seen[cluster_name] = {
                 **build, **parsed,
                 "cluster_name": cluster_name,
-                "_source_job": source_job or PROD_DEPLOY_JOB,
+                "_source_job": source_job or job,
                 "_source_build_url": source_url,
             }
 
@@ -1017,30 +1034,32 @@ async def cluster_stage(cluster_name: str, session: dict = Depends(get_session))
     jenkins = _make_client(session)
 
     # Find the building build for this cluster
-    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
-
-    # For building builds with no description yet, fetch CLUSTER_NAME from params
-    no_desc = [
-        b for b in builds
-        if b.get("building") and not _cluster_name_from_desc(b.get("description", "") or "")
-    ]
-    if no_desc:
-        param_results = await asyncio.gather(*[
-            _get_build_params_safe(jenkins, DEPLOY_JOB, b["number"])
-            for b in no_desc
-        ])
-        for build, params in zip(no_desc, param_results):
-            name = params.get("CLUSTER_NAME", "")
-            if name:
-                build["_param_cluster_name"] = name
+    # Search across all deploy jobs (QE + prod + FDF) for a building build
+    all_job_builds = await asyncio.gather(
+        jenkins.get_job_builds(DEPLOY_JOB, limit=200),
+        jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=200),
+        jenkins.get_job_builds(FDF_DEPLOY_JOB, limit=100),
+    )
 
     build_num: Optional[int] = None
     build_url: Optional[str] = None
-    for b in builds:
-        name = _cluster_name_from_desc(b.get("description", "") or "") or b.get("_param_cluster_name")
-        if name == cluster_name and b.get("building"):
-            build_num = b["number"]
-            build_url = f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{build_num}"
+    found_job = DEPLOY_JOB
+    for job, builds in zip([DEPLOY_JOB, PROD_DEPLOY_JOB, FDF_DEPLOY_JOB], all_job_builds):
+        # Enrich building builds with no description
+        no_desc = [b for b in builds if b.get("building") and not _cluster_name_from_desc(b.get("description", "") or "")]
+        if no_desc:
+            pr = await asyncio.gather(*[_get_build_params_safe(jenkins, job, b["number"]) for b in no_desc])
+            for build, params in zip(no_desc, pr):
+                if params.get("CLUSTER_NAME"):
+                    build["_param_cluster_name"] = params["CLUSTER_NAME"]
+        for b in builds:
+            name = _cluster_name_from_desc(b.get("description", "") or "") or b.get("_param_cluster_name")
+            if name == cluster_name and b.get("building"):
+                build_num = b["number"]
+                found_job = job
+                build_url = f"{settings.jenkins_url}/job/{job}/{build_num}"
+                break
+        if build_num:
             break
 
     if not build_num:
@@ -1050,13 +1069,13 @@ async def cluster_stage(cluster_name: str, session: dict = Depends(get_session))
     try:
         async with httpx.AsyncClient(timeout=10, verify=False) as c:
             r = await c.get(
-                f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{build_num}/wfapi/describe",
+                f"{settings.jenkins_url}/job/{found_job}/{build_num}/wfapi/describe",
                 auth=(session["username"], session["token"]),
             )
         if r.status_code in (401, 403):
             async with httpx.AsyncClient(timeout=10, verify=False) as c:
                 r = await c.get(
-                    f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{build_num}/wfapi/describe"
+                    f"{settings.jenkins_url}/job/{found_job}/{build_num}/wfapi/describe"
                 )
         wf = r.json()
     except Exception:

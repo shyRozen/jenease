@@ -9,6 +9,7 @@ import ClusterDetail from './pages/ClusterDetail'
 import Deploy from './pages/Deploy'
 import Login from './pages/Login'
 import MyClusters from './pages/MyClusters'
+import Presets from './pages/Presets'
 import type { User } from './types'
 
 function Placeholder({ title }: { title: string }) {
@@ -104,7 +105,7 @@ function App() {
           <Route path="all-clusters" element={<AllClusters username={user.username} />} />
           <Route path="deploy"   element={<Deploy />} />
           <Route path="destroy"  element={<Placeholder title="Destroy" />} />
-          <Route path="presets"  element={<Placeholder title="Presets" />} />
+          <Route path="presets"  element={<Presets />} />
           <Route path="agents"   element={<Agents />} />
         </Route>
       </Routes>

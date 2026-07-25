@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import type { DeployJob, JobParam } from '../pages/Deploy'
 
@@ -182,15 +183,27 @@ function BoolGroupRow({ params, values, onChange }: {
   )
 }
 
-export default function ModifyDrawer({ job, initialClusterName = '', onClose }: { job: DeployJob; initialClusterName?: string; onClose: () => void }) {
-  // Params are already fully merged in the catalog (93 params per job, pre-fetched at startup)
-  // No extra fetch needed — opens instantly
+export default function ModifyDrawer({
+  job,
+  initialClusterName = '',
+  onClose,
+  initialValues,
+  presetId,
+  presetName: initialPresetName = '',
+}: {
+  job: DeployJob
+  initialClusterName?: string
+  onClose: () => void
+  initialValues?: Record<string, string | boolean>
+  presetId?: number
+  presetName?: string
+}) {
   const effectiveParams = job.params
   const paramsLoading = false
 
   const [values, setValues] = useState<Record<string, string | boolean>>({})
 
-  // Initialize values from the pre-merged params in the catalog
+  // Initialize values — use preset initialValues as overrides when provided
   useEffect(() => {
     if (!job.params.length) return
     const init: Record<string, string | boolean> = {}
@@ -199,7 +212,7 @@ export default function ModifyDrawer({ job, initialClusterName = '', onClose }: 
         ? (p.default === 'True' || p.default === true)
         : String(p.default ?? '')
     }
-    // Non-production team defaults — mirror what the backend enforces on submit
+    // Non-production team defaults
     init['RUN_TEST'] = false
     init['PRODUCTION_RUN'] = false
     init['REPORT_PORTAL'] = false
@@ -207,19 +220,49 @@ export default function ModifyDrawer({ job, initialClusterName = '', onClose }: 
     init['LOCK_PRIORITY'] = '3'
     init['CLUSTER_PREFIX'] = ''
 
-    // Smart credentials for DC-CP lab
     if (job.platform === 'vsphere') {
       init['CREDENTIALS_CONF'] = job.features?.includes('ipv6')
         ? 'vSphere8-DC-IPv6-CP_VC1'
         : 'vSphere8-DC-CP_VC1'
     }
+
+    // Preset values override defaults (covers both full-drawer saves and quick-card saves)
+    if (initialValues) {
+      Object.assign(init, initialValues)
+    }
+
     setValues(init)
   }, [job.job_name, job.params.length])
+
   const [clusterName, setClusterName] = useState(initialClusterName)
   const [paramSearch, setParamSearch] = useState('')
   const [buildState, setBuildState] = useState<'idle' | 'sending' | 'success' | 'error'>('idle')
   const [apiCallDisplay, setApiCallDisplay] = useState('')
+
+  // Preset save state
+  const [showSaveForm, setShowSaveForm] = useState(false)
+  const [saveNameInput, setSaveNameInput] = useState(initialPresetName)
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle')
+  const queryClient = useQueryClient()
   const navigate = useNavigate()
+
+  async function handleSavePreset() {
+    if (!saveNameInput.trim()) return
+    setSaveState('saving')
+    const body = { name: saveNameInput.trim(), job: job.job_name, params: { ...values, _cluster_name: clusterName } }
+    try {
+      if (presetId) {
+        await api.patch(`/presets/${presetId}`, body)
+      } else {
+        await api.post('/presets/', body)
+      }
+      await queryClient.invalidateQueries({ queryKey: ['presets'] })
+      setSaveState('saved')
+      setTimeout(() => { setShowSaveForm(false); setSaveState('idle') }, 1500)
+    } catch {
+      setSaveState('idle')
+    }
+  }
 
   function set(name: string, v: string | boolean) {
     setValues(prev => ({ ...prev, [name]: v }))
@@ -394,7 +437,39 @@ export default function ModifyDrawer({ job, initialClusterName = '', onClose }: 
               {apiCallDisplay}
             </pre>
           )}
+
+          {/* Inline save-as-favorite form */}
+          {showSaveForm && (
+            <div className="flex items-center gap-2 mb-3 p-2 bg-surface-2 rounded border border-accent-amber/20">
+              <span className="text-accent-amber text-sm shrink-0">★</span>
+              <input
+                value={saveNameInput}
+                onChange={e => setSaveNameInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleSavePreset()}
+                placeholder="Preset name…"
+                autoFocus
+                className="input text-xs flex-1 py-1"
+              />
+              <button
+                onClick={handleSavePreset}
+                disabled={!saveNameInput.trim() || saveState === 'saving'}
+                className="btn-primary text-xs py-1 px-2 shrink-0"
+              >
+                {saveState === 'saving' ? '…' : saveState === 'saved' ? '✓ Saved' : presetId ? 'Update' : 'Save'}
+              </button>
+              <button onClick={() => setShowSaveForm(false)} className="btn-ghost text-xs py-1 px-1.5 shrink-0">✕</button>
+            </div>
+          )}
+
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => { setShowSaveForm(s => !s); if (!showSaveForm) setSaveState('idle') }}
+              className={`btn-ghost text-xs py-1.5 flex items-center gap-1 ${presetId ? 'text-accent-amber' : ''}`}
+              title={presetId ? 'Update this favorite' : 'Save as favorite'}
+            >
+              <span className={presetId ? 'text-accent-amber' : 'text-text-muted'}>★</span>
+              {presetId ? 'Update Favorite' : 'Save as Favorite'}
+            </button>
             <button onClick={onClose} className="btn-ghost ml-auto">Cancel</button>
             <button
               onClick={handleBuild}

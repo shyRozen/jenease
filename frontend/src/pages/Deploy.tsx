@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
 import { useLiveFilter } from '../hooks/useLiveFilter'
@@ -7,6 +7,15 @@ import JobCard from '../components/JobCard'
 import SearchBar from '../components/SearchBar'
 
 // ── types ──────────────────────────────────────────────────────────────────
+
+export interface Preset {
+  id: number
+  name: string
+  job: string
+  params: Record<string, string | boolean>
+  created_at: string
+  updated_at: string
+}
 
 export interface JobParam {
   name: string
@@ -145,12 +154,46 @@ export default function Deploy() {
   const [sortAsc, setSortAsc] = useState(true)
   const [modifyJob, setModifyJob] = useState<DeployJob | null>(null)
   const [modifyClusterName, setModifyClusterName] = useState('')
+  const [modifyInitialValues, setModifyInitialValues] = useState<Record<string, string | boolean> | undefined>(undefined)
+  const [modifyPresetId, setModifyPresetId] = useState<number | undefined>(undefined)
+  const [modifyPresetName, setModifyPresetName] = useState<string | undefined>(undefined)
+
+  const queryClient = useQueryClient()
 
   const { data: jobs = [], isLoading } = useQuery<DeployJob[]>({
     queryKey: ['deployments'],
     queryFn: () => api.get('/jobs/deployments'),
     staleTime: 3_600_000,
   })
+
+  const { data: presets = [] } = useQuery<Preset[]>({
+    queryKey: ['presets'],
+    queryFn: () => api.get('/presets/'),
+  })
+
+  const deletePresetMutation = useMutation({
+    mutationFn: (id: number) => api.delete(`/presets/${id}`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['presets'] }),
+  })
+
+  function openModify(job: DeployJob, clusterName: string) {
+    setModifyJob(job)
+    setModifyClusterName(clusterName)
+    setModifyInitialValues(undefined)
+    setModifyPresetId(undefined)
+    setModifyPresetName(undefined)
+  }
+
+  function openFromPreset(preset: Preset) {
+    const job = jobs.find(j => j.job_name === preset.job)
+    if (!job) return
+    const { _cluster_name, ...paramValues } = preset.params as Record<string, any>
+    setModifyJob(job)
+    setModifyClusterName(String(_cluster_name ?? ''))
+    setModifyInitialValues(paramValues as Record<string, string | boolean>)
+    setModifyPresetId(preset.id)
+    setModifyPresetName(preset.name)
+  }
 
   const { query, setQuery, filtered: textFiltered } = useLiveFilter(
     jobs,
@@ -225,6 +268,40 @@ export default function Deploy() {
         </div>
       </div>
 
+      {/* Favorites */}
+      {presets.length > 0 && (
+        <div className="flex flex-wrap gap-2 items-center pb-3 border-b border-surface-4/50">
+          <span className="text-[10px] font-mono text-accent-amber uppercase tracking-wider shrink-0">★ Favorites</span>
+          {presets.map(p => {
+            const matchedJob = jobs.find(j => j.job_name === p.job)
+            return (
+              <div
+                key={p.id}
+                className="flex items-center gap-1.5 bg-surface-2 border border-accent-amber/20 rounded-md px-2 py-1"
+              >
+                <span className="text-xs font-mono text-text-primary truncate max-w-[140px]" title={p.name}>{p.name}</span>
+                {matchedJob && (
+                  <span className="text-[9px] font-mono text-text-muted shrink-0">
+                    {matchedJob.platform ?? p.job.slice(0, 12)}
+                  </span>
+                )}
+                <button
+                  onClick={() => openFromPreset(p)}
+                  disabled={!matchedJob}
+                  className="text-[10px] font-mono text-text-muted hover:text-accent-cyan px-0.5 shrink-0 disabled:opacity-30"
+                  title="Open in Modify drawer"
+                >⚙</button>
+                <button
+                  onClick={() => deletePresetMutation.mutate(p.id)}
+                  className="text-[10px] font-mono text-text-muted hover:text-accent-red px-0.5 shrink-0"
+                  title="Remove favorite"
+                >✕</button>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
       {/* Filter chips */}
       <div className="flex flex-wrap gap-x-4 gap-y-2">
         {CHIP_GROUPS.map(group => (
@@ -274,7 +351,7 @@ export default function Deploy() {
         <div className="overflow-y-auto flex-1">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 pb-6">
             {sorted.map(job => (
-              <JobCard key={job.job_name} job={job} onModify={name => { setModifyJob(job); setModifyClusterName(name) }} />
+              <JobCard key={job.job_name} job={job} onModify={name => openModify(job, name)} />
             ))}
           </div>
         </div>
@@ -300,7 +377,7 @@ export default function Deploy() {
             </thead>
             <tbody>
               {sorted.map(job => (
-                <JobListRow key={job.job_name} job={job} onModify={name => { setModifyJob(job); setModifyClusterName(name) }} />
+                <JobListRow key={job.job_name} job={job} onModify={name => openModify(job, name)} />
               ))}
             </tbody>
           </table>
@@ -309,7 +386,19 @@ export default function Deploy() {
 
       {/* Modify drawer */}
       {modifyJob && (
-        <ModifyDrawer job={modifyJob} initialClusterName={modifyClusterName} onClose={() => setModifyJob(null)} />
+        <ModifyDrawer
+          job={modifyJob}
+          initialClusterName={modifyClusterName}
+          initialValues={modifyInitialValues}
+          presetId={modifyPresetId}
+          presetName={modifyPresetName}
+          onClose={() => {
+            setModifyJob(null)
+            setModifyInitialValues(undefined)
+            setModifyPresetId(undefined)
+            setModifyPresetName(undefined)
+          }}
+        />
       )}
     </div>
   )

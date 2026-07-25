@@ -244,6 +244,23 @@ async def active_clusters(session: dict = Depends(get_session)):
     return sorted(results, key=lambda x: x.get("timestamp") or 0, reverse=True)
 
 
+@router.get("/destroy-check")
+async def destroy_check(session: dict = Depends(get_session)):
+    """Diagnostic: verify the destroy job is reachable and check its parameter schema."""
+    jenkins = _make_client(session)
+    try:
+        job = await jenkins.get_job(DESTROY_JOB)
+        params_schema = await jenkins.get_job_params_schema(DESTROY_JOB)
+        return {
+            "job": DESTROY_JOB,
+            "buildable": job.get("buildable"),
+            "color": job.get("color"),
+            "param_names": [p.get("name") for p in params_schema],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @router.get("/destroy-log")
 async def destroy_log(session: dict = Depends(get_session)):
     """Diagnostic: show what qe-destroy-ocs-cluster has cleaned up recently."""

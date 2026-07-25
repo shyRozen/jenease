@@ -131,7 +131,13 @@ class JenkinsClient:
         return r
 
     async def trigger_job(self, job: str, params: dict) -> int:
-        r = await self._post(f"/job/{job}/buildWithParameters", params)
+        import json as _json
+        # Include both flat key-value pairs AND the json= field that browser forms send.
+        # Some Jenkins jobs validate the json field; sending only flat params can cause 500.
+        param_list = [{"name": k, "value": v} for k, v in params.items()]
+        data = dict(params)
+        data["json"] = _json.dumps({"parameter": param_list})
+        r = await self._post(f"/job/{job}/buildWithParameters", data)
         location = r.headers.get("Location", "")
         match = re.search(r"/queue/item/(\d+)/", location)
         return int(match.group(1)) if match else 0

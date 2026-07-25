@@ -459,12 +459,19 @@ async def cluster_health(cluster_name: str, session: dict = Depends(get_session)
     jenkins = _make_client(session)
     username = session["username"]
 
-    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+    all_builds = await asyncio.gather(
+        jenkins.get_job_builds(DEPLOY_JOB, limit=200),
+        jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=200),
+        jenkins.get_job_builds(FDF_DEPLOY_JOB, limit=100),
+    )
     target = None
-    for b in builds:
-        name = _cluster_name_from_desc(b.get("description", "") or "")
-        if name == cluster_name:
-            target = b
+    for builds in all_builds:
+        for b in builds:
+            name = _cluster_name_from_desc(b.get("description", "") or "")
+            if name == cluster_name:
+                target = b
+                break
+        if target:
             break
 
     if not target:

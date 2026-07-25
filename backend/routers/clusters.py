@@ -1277,14 +1277,33 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
     if not cluster_name.lower().startswith(username.lower()):
         raise HTTPException(403, "Not your cluster")
 
-    # Find the deploy build to carry over platform params
-    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+    # Search all three deploy jobs in parallel — cluster may have come from any of them
+    all_builds = await asyncio.gather(
+        jenkins.get_job_builds(DEPLOY_JOB, limit=500),
+        jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=200),
+        jenkins.get_job_builds(FDF_DEPLOY_JOB, limit=200),
+        return_exceptions=True,
+    )
+
     deploy_params: dict = {}
-    for b in builds:
-        if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
-            deploy_params = await _get_build_params_safe(jenkins, DEPLOY_JOB, b["number"])
+    found_job = DEPLOY_JOB
+    for job, builds in zip([DEPLOY_JOB, PROD_DEPLOY_JOB, FDF_DEPLOY_JOB], all_builds):
+        if isinstance(builds, Exception):
+            continue
+        for b in builds:
+            if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+                deploy_params = await _get_build_params_safe(jenkins, job, b["number"])
+                found_job = job
+                break
+        if deploy_params:
             break
 
+    print(f"[DESTROY] user={username} → {DESTROY_JOB} cluster={cluster_name} "
+          f"(params from {found_job if deploy_params else 'none found'})", flush=True)
+
+    # Build params — only string values from the deploy build; boolean flags only when True.
+    # Jenkins buildWithParameters treats any non-empty string as truthy for boolean params,
+    # so sending 'false' would incorrectly set the flag. Omitting means the job uses its default.
     params: dict = {
         "CLUSTER_NAME": cluster_name,
         "OCS_VERSION": deploy_params.get("OCS_VERSION", ""),
@@ -1293,14 +1312,16 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
         "FULL_PLATFORM_CONF": deploy_params.get("FULL_PLATFORM_CONF", ""),
         "PLATFORM_CONF": deploy_params.get("PLATFORM_CONF", ""),
         "CLUSTER_CONF": deploy_params.get("CLUSTER_CONF", ""),
-        "FORCE_JSLAVE_DESTROY": str(body.force_jslave_destroy).lower(),
-        "LONGEVITY_CLUSTER": str(body.longevity_cluster).lower(),
-        "DO_NOT_RELEASE_LOCK": str(body.do_not_release_lock).lower(),
-        "PRODUCTION_RUN": "false",
     }
-    params = {k: v for k, v in params.items() if v not in (None, "")}
+    # Only include boolean flags when explicitly set to True
+    if body.force_jslave_destroy:
+        params["FORCE_JSLAVE_DESTROY"] = "true"
+    if body.longevity_cluster:
+        params["LONGEVITY_CLUSTER"] = "true"
+    if body.do_not_release_lock:
+        params["DO_NOT_RELEASE_LOCK"] = "true"
 
-    print(f"[DESTROY] user={username} → {DESTROY_JOB} cluster={cluster_name}", flush=True)
+    params = {k: v for k, v in params.items() if v not in (None, "")}
 
     try:
         queue_item = await jenkins.trigger_job(DESTROY_JOB, params)

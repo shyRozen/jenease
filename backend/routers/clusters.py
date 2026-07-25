@@ -1338,26 +1338,41 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
     print(f"[DESTROY] user={username} → {DESTROY_JOB} cluster={cluster_name} "
           f"(params from {found_job if deploy_params else 'none found'})", flush=True)
 
-    # Build params — fall back to frontend-cached values when deploy build is not found.
-    # Only include boolean flags when True; omit when False (Jenkins treats absence as false).
-    params: dict = {
-        "CLUSTER_NAME": cluster_name,
-        "OCS_VERSION": deploy_params.get("OCS_VERSION", ""),
-        "OCP_VERSION": deploy_params.get("OCP_VERSION", ""),
-        "CREDENTIALS_CONF": deploy_params.get("CREDENTIALS_CONF", ""),
-        "FULL_PLATFORM_CONF": deploy_params.get("FULL_PLATFORM_CONF", ""),
-        "PLATFORM_CONF": deploy_params.get("PLATFORM_CONF", ""),
-        "CLUSTER_CONF": deploy_params.get("CLUSTER_CONF", ""),
-    }
+    # Fetch the destroy job's accepted param names, then pass every deploy param that matches.
+    # This ensures we don't miss required params (OCS_CI_REPOSITORY, JOBS_REPOSITORY, etc.)
+    # and don't send unknown ones that could cause a 500.
+    destroy_param_names: set[str] = set()
+    try:
+        schema = await jenkins.get_job_params_schema(DESTROY_JOB)
+        destroy_param_names = {p.get("name", "") for p in schema}
+    except Exception:
+        pass
+
+    # Seed with all deploy params that the destroy job accepts
+    params: dict = {}
+    if deploy_params and destroy_param_names:
+        for k, v in deploy_params.items():
+            if k in destroy_param_names and v not in (None, ""):
+                params[k] = v
+
+    # Always set CLUSTER_NAME (override whatever came from the deploy build)
+    params["CLUSTER_NAME"] = cluster_name
+    # Override boolean flags from the request body
     if body.force_jslave_destroy:
         params["FORCE_JSLAVE_DESTROY"] = "true"
+    elif "FORCE_JSLAVE_DESTROY" in params:
+        del params["FORCE_JSLAVE_DESTROY"]
     if body.longevity_cluster:
         params["LONGEVITY_CLUSTER"] = "true"
+    elif "LONGEVITY_CLUSTER" in params:
+        del params["LONGEVITY_CLUSTER"]
     if body.do_not_release_lock:
         params["DO_NOT_RELEASE_LOCK"] = "true"
+    elif "DO_NOT_RELEASE_LOCK" in params:
+        del params["DO_NOT_RELEASE_LOCK"]
 
     params = {k: v for k, v in params.items() if v not in (None, "")}
-    print(f"[DESTROY] sending params: {list(params.keys())}", flush=True)
+    print(f"[DESTROY] sending {len(params)} params: {sorted(params.keys())}", flush=True)
 
     try:
         queue_item = await jenkins.trigger_job(DESTROY_JOB, params, skip_crumb=True)

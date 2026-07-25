@@ -97,18 +97,21 @@ class JenkinsClient:
                 return prop["parameterDefinitions"]
         return []
 
-    async def _post(self, path: str, data: dict | None = None) -> httpx.Response:
+    async def _post(self, path: str, data: dict | None = None, skip_crumb: bool = False) -> httpx.Response:
         """POST using a single client session so the CSRF crumb stays valid."""
         import json as _json
         async with self._client() as c:
-            crumb_r = await c.get(f"{self.base}/crumbIssuer/api/json")
             crumb_headers = {}
-            if crumb_r.status_code == 200:
-                d = crumb_r.json()
-                crumb_headers = {d["crumbRequestField"]: d["crumb"]}
-                print(f"[JENKINS] crumb OK field={d['crumbRequestField']}", flush=True)
+            if not skip_crumb:
+                crumb_r = await c.get(f"{self.base}/crumbIssuer/api/json")
+                if crumb_r.status_code == 200:
+                    d = crumb_r.json()
+                    crumb_headers = {d["crumbRequestField"]: d["crumb"]}
+                    print(f"[JENKINS] crumb OK field={d['crumbRequestField']}", flush=True)
+                else:
+                    print(f"[JENKINS] crumb FAILED status={crumb_r.status_code}", flush=True)
             else:
-                print(f"[JENKINS] crumb FAILED status={crumb_r.status_code}", flush=True)
+                print(f"[JENKINS] crumb SKIPPED (API token auth)", flush=True)
             print(f"[JENKINS] POST {path} data_keys={list((data or {}).keys())}", flush=True)
             r = await c.post(f"{self.base}{path}", data=data or {}, headers=crumb_headers)
         if not r.is_success:
@@ -130,8 +133,8 @@ class JenkinsClient:
             )
         return r
 
-    async def trigger_job(self, job: str, params: dict) -> int:
-        r = await self._post(f"/job/{job}/buildWithParameters", params)
+    async def trigger_job(self, job: str, params: dict, skip_crumb: bool = False) -> int:
+        r = await self._post(f"/job/{job}/buildWithParameters", params, skip_crumb=skip_crumb)
         location = r.headers.get("Location", "")
         match = re.search(r"/queue/item/(\d+)/", location)
         return int(match.group(1)) if match else 0

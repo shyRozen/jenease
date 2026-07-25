@@ -1360,7 +1360,7 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
     print(f"[DESTROY] sending params: {list(params.keys())}", flush=True)
 
     try:
-        queue_item = await jenkins.trigger_job(DESTROY_JOB, params)
+        queue_item = await jenkins.trigger_job(DESTROY_JOB, params, skip_crumb=True)
     except Exception as e:
         print(f"[DESTROY ERROR] {e}", flush=True)
         raise HTTPException(502, f"Jenkins destroy failed: {e}")

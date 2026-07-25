@@ -3,6 +3,7 @@ import { api } from '../api/client'
 
 interface DestroyDrawerProps {
   clusterName: string
+  buildUrl?: string
   ocpVersion?: string
   ocsVersion?: string
   credentialsConf?: string
@@ -13,6 +14,7 @@ interface DestroyDrawerProps {
 
 export default function DestroyDrawer({
   clusterName,
+  buildUrl,
   ocpVersion,
   ocsVersion,
   credentialsConf,
@@ -23,16 +25,18 @@ export default function DestroyDrawer({
   const [forceJslave, setForceJslave] = useState(false)
   const [longevity, setLongevity] = useState(false)
   const [doNotRelease, setDoNotRelease] = useState(false)
-  const [credConf, setCredConf] = useState(credentialsConf ?? '')
   const [step, setStep] = useState<'options' | 'confirm' | 'sending' | 'success' | 'error'>('options')
   const [apiDisplay, setApiDisplay] = useState('')
 
   async function handleDestroy() {
     const paramStr = [
       `CLUSTER_NAME=${clusterName}`,
-      credConf ? `CREDENTIALS_CONF=${credConf}` : null,
-      forceJslave ? 'FORCE_JSLAVE_DESTROY=true' : null,
-      longevity ? 'LONGEVITY_CLUSTER=true' : null,
+      ocpVersion   ? `OCP_VERSION=${ocpVersion}` : null,
+      ocsVersion   ? `OCS_VERSION=${ocsVersion}` : null,
+      credentialsConf ? `CREDENTIALS_CONF=${credentialsConf}` : null,
+      platformConf    ? `FULL_PLATFORM_CONF=${platformConf}` : null,
+      forceJslave  ? 'FORCE_JSLAVE_DESTROY=true' : null,
+      longevity    ? 'LONGEVITY_CLUSTER=true' : null,
       doNotRelease ? 'DO_NOT_RELEASE_LOCK=true' : null,
     ].filter(Boolean).join('\n  ')
 
@@ -44,8 +48,7 @@ export default function DestroyDrawer({
         force_jslave_destroy: forceJslave,
         longevity_cluster: longevity,
         do_not_release_lock: doNotRelease,
-        credentials_conf: credConf,
-        full_platform_conf: platformConf ?? '',
+        build_url: buildUrl ?? '',
       })
       setApiDisplay(prev => `${prev}\n\n✓ 201 — Destroy job queued`)
       setStep('success')
@@ -81,93 +84,58 @@ export default function DestroyDrawer({
             )}
           </div>
 
-          {/* Info */}
-          <div className="px-5 py-3 border-b border-surface-4 space-y-2">
-            <p className="text-[10px] font-mono text-text-muted uppercase tracking-wider">Carried from deploy</p>
-            {ocpVersion && (
-              <div className="flex gap-3 text-xs font-mono items-center">
-                <span className="text-text-muted w-24 shrink-0">OCP</span>
-                <span className="text-text-secondary">{ocpVersion}</span>
+          {/* Params from deploy build */}
+          <div className="px-5 py-3 border-b border-surface-4 space-y-1">
+            <p className="text-[10px] font-mono text-text-muted uppercase tracking-wider mb-2">From deploy build</p>
+            {[
+              ['OCP', ocpVersion],
+              ['OCS', ocsVersion],
+              ['Credentials', credentialsConf],
+              ['Platform conf', platformConf],
+            ].map(([label, val]) => val ? (
+              <div key={label} className="flex gap-3 text-xs font-mono">
+                <span className="text-text-muted w-28 shrink-0">{label}</span>
+                <span className="text-text-secondary truncate text-[11px]">{val}</span>
               </div>
+            ) : null)}
+            {!ocpVersion && !ocsVersion && !credentialsConf && !platformConf && (
+              <p className="text-[10px] font-mono text-accent-amber">
+                Build params will be fetched directly from Jenkins at trigger time.
+              </p>
             )}
-            {ocsVersion && (
-              <div className="flex gap-3 text-xs font-mono items-center">
-                <span className="text-text-muted w-24 shrink-0">OCS</span>
-                <span className="text-text-secondary">{ocsVersion}</span>
-              </div>
-            )}
-            {platformConf && (
-              <div className="flex gap-3 text-xs font-mono items-center">
-                <span className="text-text-muted w-24 shrink-0">Platform conf</span>
-                <span className="text-text-secondary truncate text-[10px]">{platformConf}</span>
-              </div>
-            )}
-            {/* CREDENTIALS_CONF — editable, required for teardown */}
-            <div className="flex gap-3 text-xs font-mono items-center">
-              <span className="text-text-muted w-24 shrink-0">Credentials <span className="text-accent-red">*</span></span>
-              <input
-                value={credConf}
-                onChange={e => setCredConf(e.target.value)}
-                disabled={step !== 'options' && step !== 'confirm'}
-                placeholder="e.g. vSphere8-DC-CP_VC1"
-                className="flex-1 bg-surface-3 border border-surface-4 rounded px-2 py-0.5 text-[11px] font-mono text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-60"
-              />
-            </div>
           </div>
 
           {/* Options */}
           <div className="px-5 py-3 border-b border-surface-4 space-y-2.5">
             <p className="text-[10px] font-mono text-text-muted uppercase tracking-wider">Options</p>
-            <label className="flex items-start gap-2 cursor-pointer group">
-              <input
-                type="checkbox"
-                checked={forceJslave}
-                onChange={e => setForceJslave(e.target.checked)}
-                disabled={step !== 'options' && step !== 'confirm'}
-                className="accent-accent-red mt-0.5 shrink-0"
-              />
-              <div>
-                <span className="text-xs font-mono text-text-secondary group-hover:text-text-primary">FORCE_JSLAVE_DESTROY</span>
-                <p className="text-[10px] font-mono text-text-muted leading-snug">Force agent destroy even if cluster teardown failed</p>
-              </div>
-            </label>
-            <label className="flex items-start gap-2 cursor-pointer group">
-              <input
-                type="checkbox"
-                checked={longevity}
-                onChange={e => setLongevity(e.target.checked)}
-                disabled={step !== 'options' && step !== 'confirm'}
-                className="accent-accent-red mt-0.5 shrink-0"
-              />
-              <div>
-                <span className="text-xs font-mono text-text-secondary group-hover:text-text-primary">LONGEVITY_CLUSTER</span>
-                <p className="text-[10px] font-mono text-text-muted leading-snug">Required if this cluster is marked as longevity</p>
-              </div>
-            </label>
-            <label className="flex items-start gap-2 cursor-pointer group">
-              <input
-                type="checkbox"
-                checked={doNotRelease}
-                onChange={e => setDoNotRelease(e.target.checked)}
-                disabled={step !== 'options' && step !== 'confirm'}
-                className="accent-accent-red mt-0.5 shrink-0"
-              />
-              <div>
-                <span className="text-xs font-mono text-text-secondary group-hover:text-text-primary">DO_NOT_RELEASE_LOCK</span>
-                <p className="text-[10px] font-mono text-text-muted leading-snug">Keep resource locked — use when redeploying immediately</p>
-              </div>
-            </label>
+            {[
+              { state: forceJslave,  set: setForceJslave,  name: 'FORCE_JSLAVE_DESTROY',  desc: 'Force agent destroy even if cluster teardown failed' },
+              { state: longevity,    set: setLongevity,    name: 'LONGEVITY_CLUSTER',      desc: 'Required if this cluster is marked as longevity' },
+              { state: doNotRelease, set: setDoNotRelease, name: 'DO_NOT_RELEASE_LOCK',    desc: 'Keep resource locked — use when redeploying immediately' },
+            ].map(({ state, set, name, desc }) => (
+              <label key={name} className="flex items-start gap-2 cursor-pointer group">
+                <input
+                  type="checkbox"
+                  checked={state}
+                  onChange={e => set(e.target.checked)}
+                  disabled={step !== 'options' && step !== 'confirm'}
+                  className="accent-accent-red mt-0.5 shrink-0"
+                />
+                <div>
+                  <span className="text-xs font-mono text-text-secondary group-hover:text-text-primary">{name}</span>
+                  <p className="text-[10px] font-mono text-text-muted leading-snug">{desc}</p>
+                </div>
+              </label>
+            ))}
           </div>
 
           {/* API display */}
           {apiDisplay && (
             <div className="px-5 py-3 border-b border-surface-4">
               <pre className={`text-[10px] font-mono whitespace-pre-wrap leading-relaxed rounded p-2 border ${
-                step === 'success'
-                  ? 'text-accent-green bg-accent-green/5 border-accent-green/20'
-                  : step === 'error'
-                  ? 'text-accent-red bg-accent-red/5 border-accent-red/20'
-                  : 'text-text-secondary bg-surface-3 border-surface-4'
+                step === 'success' ? 'text-accent-green bg-accent-green/5 border-accent-green/20'
+                : step === 'error' ? 'text-accent-red bg-accent-red/5 border-accent-red/20'
+                : 'text-text-secondary bg-surface-3 border-surface-4'
               }`}>
                 {apiDisplay}
               </pre>
@@ -218,7 +186,7 @@ export default function DestroyDrawer({
             )}
             {step === 'error' && (
               <>
-                <button onClick={() => { setStep('options'); setApiDisplay(''); setCredConf(credConf) }} className="btn-ghost">Try again</button>
+                <button onClick={() => { setStep('options'); setApiDisplay('') }} className="btn-ghost">Try again</button>
                 <button onClick={onClose} className="btn-ghost">Close</button>
               </>
             )}

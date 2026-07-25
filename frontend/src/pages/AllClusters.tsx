@@ -336,6 +336,7 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
       {destroyOpen && (
         <DestroyDrawer
           clusterName={c.cluster_name}
+          buildUrl={c.build_url}
           ocpVersion={c.ocp_version}
           ocsVersion={c.ocs_version}
           credentialsConf={c.credentials_conf}

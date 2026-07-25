@@ -399,6 +399,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
         clusterName={cluster.cluster_name}
         ocpVersion={cluster.ocp_version}
         ocsVersion={cluster.ocs_version}
+        buildUrl={cluster.build_url}
         credentialsConf={cluster.credentials_conf}
         platformConf={cluster.platform_conf}
         onClose={() => setDestroyOpen(false)}

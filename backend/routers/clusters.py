@@ -1266,10 +1266,17 @@ class DestroyRequest(BaseModel):
     force_jslave_destroy: bool = False
     longevity_cluster: bool = False
     do_not_release_lock: bool = False
-    # Fallback values from the frontend's cached cluster data — used when the deploy build
-    # is no longer in Jenkins history and we can't look up the original params
-    credentials_conf: str = ""
-    full_platform_conf: str = ""
+    # Build URL from the frontend's cached cluster data — lets us go straight to the right build
+    # instead of scanning hundreds of builds. Format: .../job/JOB_NAME/BUILD_NUM/
+    build_url: str = ""
+
+
+def _job_and_num_from_url(build_url: str) -> tuple[str, int]:
+    """Extract (job_name, build_num) from a Jenkins build URL."""
+    m = re.search(r'/job/([^/]+)/(\d+)/?$', build_url.rstrip('/'))
+    if m:
+        return m.group(1), int(m.group(2))
+    return "", 0
 
 
 @router.post("/{cluster_name}/destroy")
@@ -1281,26 +1288,35 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
     if not cluster_name.lower().startswith(username.lower()):
         raise HTTPException(403, "Not your cluster")
 
-    # Search all three deploy jobs in parallel — cluster may have come from any of them
-    all_builds = await asyncio.gather(
-        jenkins.get_job_builds(DEPLOY_JOB, limit=500),
-        jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=200),
-        jenkins.get_job_builds(FDF_DEPLOY_JOB, limit=200),
-        return_exceptions=True,
-    )
-
     deploy_params: dict = {}
     found_job = DEPLOY_JOB
-    for job, builds in zip([DEPLOY_JOB, PROD_DEPLOY_JOB, FDF_DEPLOY_JOB], all_builds):
-        if isinstance(builds, Exception):
-            continue
-        for b in builds:
-            if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
-                deploy_params = await _get_build_params_safe(jenkins, job, b["number"])
-                found_job = job
+
+    # Fast path: frontend passes the build_url — go directly to that build
+    if body.build_url:
+        job, build_num = _job_and_num_from_url(body.build_url)
+        if job and build_num:
+            deploy_params = await _get_build_params_safe(jenkins, job, build_num)
+            found_job = job
+            print(f"[DESTROY] direct lookup {job}#{build_num} → {len(deploy_params)} params", flush=True)
+
+    # Fallback: scan all three deploy jobs by description (covers clusters where build_url wasn't passed)
+    if not deploy_params:
+        all_builds = await asyncio.gather(
+            jenkins.get_job_builds(DEPLOY_JOB, limit=500),
+            jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=200),
+            jenkins.get_job_builds(FDF_DEPLOY_JOB, limit=200),
+            return_exceptions=True,
+        )
+        for job, builds in zip([DEPLOY_JOB, PROD_DEPLOY_JOB, FDF_DEPLOY_JOB], all_builds):
+            if isinstance(builds, Exception):
+                continue
+            for b in builds:
+                if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+                    deploy_params = await _get_build_params_safe(jenkins, job, b["number"])
+                    found_job = job
+                    break
+            if deploy_params:
                 break
-        if deploy_params:
-            break
 
     print(f"[DESTROY] user={username} → {DESTROY_JOB} cluster={cluster_name} "
           f"(params from {found_job if deploy_params else 'none found'})", flush=True)
@@ -1311,10 +1327,10 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
         "CLUSTER_NAME": cluster_name,
         "OCS_VERSION": deploy_params.get("OCS_VERSION", ""),
         "OCP_VERSION": deploy_params.get("OCP_VERSION", ""),
-        "CREDENTIALS_CONF": deploy_params.get("CREDENTIALS_CONF", "") or body.credentials_conf,
-        "FULL_PLATFORM_CONF": deploy_params.get("FULL_PLATFORM_CONF", "") or body.full_platform_conf,
+        "CREDENTIALS_CONF": deploy_params.get("CREDENTIALS_CONF", ""),
+        "FULL_PLATFORM_CONF": deploy_params.get("FULL_PLATFORM_CONF", ""),
         "PLATFORM_CONF": deploy_params.get("PLATFORM_CONF", ""),
-        "CLUSTER_CONF": deploy_params.get("CLUSTER_CONF", "") or body.full_platform_conf,
+        "CLUSTER_CONF": deploy_params.get("CLUSTER_CONF", ""),
     }
     if body.force_jslave_destroy:
         params["FORCE_JSLAVE_DESTROY"] = "true"

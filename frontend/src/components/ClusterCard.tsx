@@ -15,6 +15,7 @@ interface ClusterInfo {
   ocp_version: string
   ocs_version: string
   credentials_conf: string
+  platform_conf?: string
   osd_size: string
   kubeconfig_url?: string
   console_url?: string
@@ -399,6 +400,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
         ocpVersion={cluster.ocp_version}
         ocsVersion={cluster.ocs_version}
         credentialsConf={cluster.credentials_conf}
+        platformConf={cluster.platform_conf}
         onClose={() => setDestroyOpen(false)}
         onDestroyed={() => queryClient.invalidateQueries({ queryKey: ['clusters'] })}
       />

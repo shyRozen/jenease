@@ -6,6 +6,7 @@ interface DestroyDrawerProps {
   ocpVersion?: string
   ocsVersion?: string
   credentialsConf?: string
+  platformConf?: string
   onClose: () => void
   onDestroyed?: () => void
 }
@@ -15,6 +16,7 @@ export default function DestroyDrawer({
   ocpVersion,
   ocsVersion,
   credentialsConf,
+  platformConf,
   onClose,
   onDestroyed,
 }: DestroyDrawerProps) {
@@ -40,6 +42,8 @@ export default function DestroyDrawer({
         force_jslave_destroy: forceJslave,
         longevity_cluster: longevity,
         do_not_release_lock: doNotRelease,
+        credentials_conf: credentialsConf ?? '',
+        full_platform_conf: platformConf ?? '',
       })
       setApiDisplay(prev => `${prev}\n\n✓ 201 — Destroy job queued`)
       setStep('success')
@@ -95,6 +99,12 @@ export default function DestroyDrawer({
               <div className="flex gap-3 text-xs font-mono">
                 <span className="text-text-muted w-24">Credentials</span>
                 <span className="text-text-secondary truncate">{credentialsConf}</span>
+              </div>
+            )}
+            {platformConf && (
+              <div className="flex gap-3 text-xs font-mono">
+                <span className="text-text-muted w-24">Platform conf</span>
+                <span className="text-text-secondary truncate">{platformConf}</span>
               </div>
             )}
           </div>

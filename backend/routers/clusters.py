@@ -1266,6 +1266,10 @@ class DestroyRequest(BaseModel):
     force_jslave_destroy: bool = False
     longevity_cluster: bool = False
     do_not_release_lock: bool = False
+    # Fallback values from the frontend's cached cluster data — used when the deploy build
+    # is no longer in Jenkins history and we can't look up the original params
+    credentials_conf: str = ""
+    full_platform_conf: str = ""
 
 
 @router.post("/{cluster_name}/destroy")
@@ -1304,14 +1308,15 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
     # Build params — only string values from the deploy build; boolean flags only when True.
     # Jenkins buildWithParameters treats any non-empty string as truthy for boolean params,
     # so sending 'false' would incorrectly set the flag. Omitting means the job uses its default.
+    # Fall back to values the frontend cached from the cluster list when deploy build is not found.
     params: dict = {
         "CLUSTER_NAME": cluster_name,
         "OCS_VERSION": deploy_params.get("OCS_VERSION", ""),
         "OCP_VERSION": deploy_params.get("OCP_VERSION", ""),
-        "CREDENTIALS_CONF": deploy_params.get("CREDENTIALS_CONF", ""),
-        "FULL_PLATFORM_CONF": deploy_params.get("FULL_PLATFORM_CONF", ""),
+        "CREDENTIALS_CONF": deploy_params.get("CREDENTIALS_CONF", "") or body.credentials_conf,
+        "FULL_PLATFORM_CONF": deploy_params.get("FULL_PLATFORM_CONF", "") or body.full_platform_conf,
         "PLATFORM_CONF": deploy_params.get("PLATFORM_CONF", ""),
-        "CLUSTER_CONF": deploy_params.get("CLUSTER_CONF", ""),
+        "CLUSTER_CONF": deploy_params.get("CLUSTER_CONF", "") or body.full_platform_conf,
     }
     # Only include boolean flags when explicitly set to True
     if body.force_jslave_destroy:

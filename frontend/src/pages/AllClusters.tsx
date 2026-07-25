@@ -339,6 +339,7 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
           ocpVersion={c.ocp_version}
           ocsVersion={c.ocs_version}
           credentialsConf={c.credentials_conf}
+          platformConf={c.platform_conf}
           onClose={() => setDestroyOpen(false)}
           onDestroyed={() => {
             setDestroyOpen(false)

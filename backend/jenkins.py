@@ -99,16 +99,32 @@ class JenkinsClient:
 
     async def _post(self, path: str, data: dict | None = None) -> httpx.Response:
         """POST using a single client session so the CSRF crumb stays valid."""
+        import json as _json
         async with self._client() as c:
             crumb_r = await c.get(f"{self.base}/crumbIssuer/api/json")
             crumb_headers = {}
             if crumb_r.status_code == 200:
                 d = crumb_r.json()
                 crumb_headers = {d["crumbRequestField"]: d["crumb"]}
+                print(f"[JENKINS] crumb OK field={d['crumbRequestField']}", flush=True)
+            else:
+                print(f"[JENKINS] crumb FAILED status={crumb_r.status_code}", flush=True)
+            print(f"[JENKINS] POST {path} data_keys={list((data or {}).keys())}", flush=True)
             r = await c.post(f"{self.base}{path}", data=data or {}, headers=crumb_headers)
         if not r.is_success:
+            # Try to extract a human-readable error from Jenkins HTML
+            body = r.text
+            err_text = body[:2000]
+            m = re.search(r'<h2[^>]*>(.*?)</h2>', body, re.DOTALL | re.IGNORECASE)
+            if m:
+                err_text = re.sub(r'<[^>]+>', '', m.group(1)).strip() or err_text
+            else:
+                m = re.search(r'(?:hudson|jenkins)[^<]{0,200}error[^<]{0,400}', body, re.IGNORECASE | re.DOTALL)
+                if m:
+                    err_text = re.sub(r'<[^>]+>', '', m.group(0)).strip()[:400] or err_text
+            print(f"[JENKINS] POST failed {r.status_code}: {err_text[:400]}", flush=True)
             raise httpx.HTTPStatusError(
-                f"{r.status_code} from {r.url} — {r.text[:400]}",
+                f"{r.status_code} from {r.url} — {err_text[:600]}",
                 request=r.request,
                 response=r,
             )
@@ -116,6 +132,15 @@ class JenkinsClient:
 
     async def trigger_job(self, job: str, params: dict) -> int:
         r = await self._post(f"/job/{job}/buildWithParameters", params)
+        location = r.headers.get("Location", "")
+        match = re.search(r"/queue/item/(\d+)/", location)
+        return int(match.group(1)) if match else 0
+
+    async def trigger_job_json(self, job: str, params: dict) -> int:
+        """Trigger using JSON body format — explicit types for booleans, avoids form-encoding issues."""
+        import json as _json
+        param_list = [{"name": k, "value": v} for k, v in params.items()]
+        r = await self._post(f"/job/{job}/build", {"json": _json.dumps({"parameter": param_list})})
         location = r.headers.get("Location", "")
         match = re.search(r"/queue/item/(\d+)/", location)
         return int(match.group(1)) if match else 0

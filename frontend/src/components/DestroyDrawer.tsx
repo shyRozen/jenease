@@ -23,12 +23,14 @@ export default function DestroyDrawer({
   const [forceJslave, setForceJslave] = useState(false)
   const [longevity, setLongevity] = useState(false)
   const [doNotRelease, setDoNotRelease] = useState(false)
+  const [credConf, setCredConf] = useState(credentialsConf ?? '')
   const [step, setStep] = useState<'options' | 'confirm' | 'sending' | 'success' | 'error'>('options')
   const [apiDisplay, setApiDisplay] = useState('')
 
   async function handleDestroy() {
     const paramStr = [
       `CLUSTER_NAME=${clusterName}`,
+      credConf ? `CREDENTIALS_CONF=${credConf}` : null,
       forceJslave ? 'FORCE_JSLAVE_DESTROY=true' : null,
       longevity ? 'LONGEVITY_CLUSTER=true' : null,
       doNotRelease ? 'DO_NOT_RELEASE_LOCK=true' : null,
@@ -42,7 +44,7 @@ export default function DestroyDrawer({
         force_jslave_destroy: forceJslave,
         longevity_cluster: longevity,
         do_not_release_lock: doNotRelease,
-        credentials_conf: credentialsConf ?? '',
+        credentials_conf: credConf,
         full_platform_conf: platformConf ?? '',
       })
       setApiDisplay(prev => `${prev}\n\n✓ 201 — Destroy job queued`)
@@ -54,7 +56,6 @@ export default function DestroyDrawer({
     } catch (e: any) {
       setApiDisplay(prev => `${prev}\n\n✕ ${(e as Error).message}`)
       setStep('error')
-      setTimeout(() => { setStep('options'); setApiDisplay('') }, 4000)
     }
   }
 
@@ -81,32 +82,37 @@ export default function DestroyDrawer({
           </div>
 
           {/* Info */}
-          <div className="px-5 py-3 border-b border-surface-4 space-y-1">
-            <p className="text-[10px] font-mono text-text-muted uppercase tracking-wider mb-2">Carried from deploy</p>
+          <div className="px-5 py-3 border-b border-surface-4 space-y-2">
+            <p className="text-[10px] font-mono text-text-muted uppercase tracking-wider">Carried from deploy</p>
             {ocpVersion && (
-              <div className="flex gap-3 text-xs font-mono">
-                <span className="text-text-muted w-24">OCP</span>
+              <div className="flex gap-3 text-xs font-mono items-center">
+                <span className="text-text-muted w-24 shrink-0">OCP</span>
                 <span className="text-text-secondary">{ocpVersion}</span>
               </div>
             )}
             {ocsVersion && (
-              <div className="flex gap-3 text-xs font-mono">
-                <span className="text-text-muted w-24">OCS</span>
+              <div className="flex gap-3 text-xs font-mono items-center">
+                <span className="text-text-muted w-24 shrink-0">OCS</span>
                 <span className="text-text-secondary">{ocsVersion}</span>
               </div>
             )}
-            {credentialsConf && (
-              <div className="flex gap-3 text-xs font-mono">
-                <span className="text-text-muted w-24">Credentials</span>
-                <span className="text-text-secondary truncate">{credentialsConf}</span>
-              </div>
-            )}
             {platformConf && (
-              <div className="flex gap-3 text-xs font-mono">
-                <span className="text-text-muted w-24">Platform conf</span>
-                <span className="text-text-secondary truncate">{platformConf}</span>
+              <div className="flex gap-3 text-xs font-mono items-center">
+                <span className="text-text-muted w-24 shrink-0">Platform conf</span>
+                <span className="text-text-secondary truncate text-[10px]">{platformConf}</span>
               </div>
             )}
+            {/* CREDENTIALS_CONF — editable, required for teardown */}
+            <div className="flex gap-3 text-xs font-mono items-center">
+              <span className="text-text-muted w-24 shrink-0">Credentials <span className="text-accent-red">*</span></span>
+              <input
+                value={credConf}
+                onChange={e => setCredConf(e.target.value)}
+                disabled={step !== 'options' && step !== 'confirm'}
+                placeholder="e.g. vSphere8-DC-CP_VC1"
+                className="flex-1 bg-surface-3 border border-surface-4 rounded px-2 py-0.5 text-[11px] font-mono text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-60"
+              />
+            </div>
           </div>
 
           {/* Options */}
@@ -211,7 +217,10 @@ export default function DestroyDrawer({
               <span className="text-xs font-mono text-accent-green">✓ Destroy job queued — closing…</span>
             )}
             {step === 'error' && (
-              <button onClick={onClose} className="btn-ghost">Close</button>
+              <>
+                <button onClick={() => { setStep('options'); setApiDisplay(''); setCredConf(credConf) }} className="btn-ghost">Try again</button>
+                <button onClick={onClose} className="btn-ghost">Close</button>
+              </>
             )}
           </div>
         </div>

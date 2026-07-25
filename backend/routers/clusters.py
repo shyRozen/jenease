@@ -1305,10 +1305,8 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
     print(f"[DESTROY] user={username} → {DESTROY_JOB} cluster={cluster_name} "
           f"(params from {found_job if deploy_params else 'none found'})", flush=True)
 
-    # Build params — only string values from the deploy build; boolean flags only when True.
-    # Jenkins buildWithParameters treats any non-empty string as truthy for boolean params,
-    # so sending 'false' would incorrectly set the flag. Omitting means the job uses its default.
-    # Fall back to values the frontend cached from the cluster list when deploy build is not found.
+    # Build params — fall back to frontend-cached values when deploy build is not found.
+    # Only include boolean flags when True; omit when False (Jenkins treats absence as false).
     params: dict = {
         "CLUSTER_NAME": cluster_name,
         "OCS_VERSION": deploy_params.get("OCS_VERSION", ""),
@@ -1318,7 +1316,6 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
         "PLATFORM_CONF": deploy_params.get("PLATFORM_CONF", ""),
         "CLUSTER_CONF": deploy_params.get("CLUSTER_CONF", "") or body.full_platform_conf,
     }
-    # Only include boolean flags when explicitly set to True
     if body.force_jslave_destroy:
         params["FORCE_JSLAVE_DESTROY"] = "true"
     if body.longevity_cluster:
@@ -1327,6 +1324,7 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
         params["DO_NOT_RELEASE_LOCK"] = "true"
 
     params = {k: v for k, v in params.items() if v not in (None, "")}
+    print(f"[DESTROY] sending params: {list(params.keys())}", flush=True)
 
     try:
         queue_item = await jenkins.trigger_job(DESTROY_JOB, params)

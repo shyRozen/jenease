@@ -323,6 +323,7 @@ export default function WorkloadPanel({
   kubeconfigUrl,
   showLauncher = true,
   showList = true,
+  isOwner = false,
   sharedRatesRef,
   cephAgg,
   historyRef,
@@ -333,6 +334,7 @@ export default function WorkloadPanel({
   kubeconfigUrl?: string
   showLauncher?: boolean
   showList?: boolean
+  isOwner?: boolean
   sharedRatesRef?: React.MutableRefObject<Record<number, number>>
   cephAgg?: { r: number; w: number }
   poolBreakdown?: { rbd: number; cephfs: number; noobaa: number }
@@ -1393,6 +1395,7 @@ export default function WorkloadPanel({
                 {allCollapsed ? '▸ Expand terminals' : '▾ Collapse terminals'}
               </button>
             </div>
+            {isOwner && (
             <div className="flex items-center gap-2">
               {confirmClearAll && !clearAll && (
                 <>
@@ -1420,6 +1423,7 @@ export default function WorkloadPanel({
                 </button>
               )}
             </div>
+            )}
           </div>
           {workloads.map(w => (
             <WorkloadCard
@@ -1446,7 +1450,7 @@ export default function WorkloadPanel({
         <p className="text-[10px] font-mono text-text-muted text-center py-2">No active workloads</p>
       )}
 
-      {showList && (
+      {showList && isOwner && (
         <button
           onClick={handlePurge}
           disabled={purging}

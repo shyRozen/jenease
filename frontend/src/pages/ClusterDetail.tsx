@@ -124,10 +124,11 @@ function fmtBytes(bytes: number): string {
   return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`
 }
 
-function OsdCapacityBar({ capacity, clusterName, kubeconfigUrl }: {
+function OsdCapacityBar({ capacity, clusterName, kubeconfigUrl, isOwner = false }: {
   capacity: CephCapacity
   clusterName: string
   kubeconfigUrl?: string
+  isOwner?: boolean
 }) {
   const { bytes_total, bytes_used, bytes_available } = capacity
   const [trimming,   setTrimming]   = useState(false)
@@ -200,6 +201,7 @@ function OsdCapacityBar({ capacity, clusterName, kubeconfigUrl }: {
       <div className="flex items-center justify-between text-[10px] font-mono">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-text-secondary">Used <span className="text-text-primary">{fmtBytes(bytes_used)}</span></span>
+          {isOwner && (<>
           <button
             onClick={handleTrim}
             disabled={trimming}
@@ -216,6 +218,7 @@ function OsdCapacityBar({ capacity, clusterName, kubeconfigUrl }: {
           >
             {cleaning ? '⏳' : '🗑 Clean WL'}
           </button>
+          </>)}
           {trimMsg  && <span className="text-[9px] font-mono text-text-muted">{trimMsg}</span>}
           {cleanMsg && <span className="text-[9px] font-mono text-accent-red/80">{cleanMsg}</span>}
         </div>
@@ -667,6 +670,7 @@ export default function ClusterDetail() {
                 capacity={health.ceph_capacity}
                 clusterName={name!}
                 kubeconfigUrl={cluster?.kubeconfig_url}
+                isOwner={isOwner}
               />
             ) : null}
 
@@ -758,6 +762,7 @@ export default function ClusterDetail() {
                   clusterName={name!}
                   kubeconfigUrl={cluster?.kubeconfig_url}
                   showLauncher={false}
+                  isOwner={isOwner}
                   sharedRatesRef={isOwner ? sharedRatesRef : undefined}
                   cephAgg={cephAgg}
                   poolBreakdown={poolBreakdown}

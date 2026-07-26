@@ -144,15 +144,25 @@ export default function NotificationBell() {
               ) : notifications.map(n => (
                 <div
                   key={n.id}
-                  onClick={() => handleNotifClick(n)}
-                  className={`px-3 py-2.5 border-b border-surface-4/50 cursor-pointer hover:bg-surface-2 transition-colors flex gap-2 ${!n.read ? 'bg-surface-2/50' : ''}`}
+                  className={`px-3 py-2.5 border-b border-surface-4/50 flex gap-2 items-start group ${!n.read ? 'bg-surface-2/50' : ''}`}
                 >
-                  {!n.read && <div className="w-1.5 h-1.5 rounded-full bg-accent-cyan mt-1.5 shrink-0" />}
-                  {n.read && <div className="w-1.5 shrink-0" />}
-                  <div className="min-w-0">
+                  <div className="mt-1.5 shrink-0">
+                    {!n.read
+                      ? <div className="w-1.5 h-1.5 rounded-full bg-accent-cyan" />
+                      : <div className="w-1.5" />
+                    }
+                  </div>
+                  <div className="min-w-0 flex-1 cursor-pointer hover:opacity-80" onClick={() => handleNotifClick(n)}>
                     <p className="text-[11px] font-mono text-text-primary leading-snug">{n.message}</p>
                     <p className="text-[9px] font-mono text-text-muted mt-0.5">{timeAgo(n.created_at)}</p>
                   </div>
+                  {!n.read && (
+                    <button
+                      onClick={e => { e.stopPropagation(); markRead(n.id) }}
+                      className="shrink-0 text-[9px] font-mono text-text-muted hover:text-accent-cyan transition-colors opacity-0 group-hover:opacity-100 mt-0.5"
+                      title="Mark as read"
+                    >✓</button>
+                  )}
                 </div>
               ))}
             </div>

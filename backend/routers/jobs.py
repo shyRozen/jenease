@@ -227,6 +227,7 @@ class TriggerRequest(BaseModel):
     job_name: str
     params: dict
     cluster_name: str
+    user_set_credentials: bool = False  # True when user explicitly chose CREDENTIALS_CONF in ModifyDrawer
 
 
 @router.post("/trigger")
@@ -249,13 +250,15 @@ async def trigger_job(body: TriggerRequest, session: dict = Depends(get_session)
     params = {**body.params, **NON_PROD_DEFAULTS}
     params["CLUSTER_NAME"] = body.cluster_name
 
-    # Enforce DC-CP credentials for vsphere jobs (production uses ECO)
+    # Enforce DC-CP credentials for vsphere jobs (production trigger defaults use ECO).
+    # Skip when the user explicitly chose credentials in ModifyDrawer.
     full_platform = params.get("FULL_PLATFORM_CONF", "") or params.get("CLUSTER_CONF", "")
-    if "vsphere" in body.job_name.lower() or "vsphere" in full_platform.lower():
-        if "ipv6" in body.job_name.lower() or "ipv6" in full_platform.lower():
-            params["CREDENTIALS_CONF"] = VSPHERE_CREDS_IPV6
-        else:
-            params["CREDENTIALS_CONF"] = VSPHERE_CREDS
+    if not body.user_set_credentials:
+        if "vsphere" in body.job_name.lower() or "vsphere" in full_platform.lower():
+            if "ipv6" in body.job_name.lower() or "ipv6" in full_platform.lower():
+                params["CREDENTIALS_CONF"] = VSPHERE_CREDS_IPV6
+            else:
+                params["CREDENTIALS_CONF"] = VSPHERE_CREDS
 
     # Normalize booleans to lowercase strings — Jenkins rejects True/False
     params = {

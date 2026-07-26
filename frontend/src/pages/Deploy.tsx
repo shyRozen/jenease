@@ -204,7 +204,7 @@ export default function Deploy() {
     const { _cluster_name, ...params } = p.params as Record<string, any>
     const clusterName = String(_cluster_name ?? '')
     try {
-      await api.post('/jobs/trigger', { job_name: p.job, params, cluster_name: clusterName })
+      await api.post('/jobs/trigger', { job_name: p.job, params, cluster_name: clusterName, user_set_credentials: true })
       setPresetToasts(t => ({ ...t, [p.id]: '✓' }))
       setTimeout(() => navigate(`/clusters?highlight=${encodeURIComponent(clusterName)}`), 1200)
     } catch (e: any) {

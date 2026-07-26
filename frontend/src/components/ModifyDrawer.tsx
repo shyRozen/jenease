@@ -287,6 +287,7 @@ export default function ModifyDrawer({
         job_name: job.job_name,
         params: values,
         cluster_name: clusterName,
+        user_set_credentials: true,  // user explicitly reviewed/set all params in the drawer
       })
       setBuildState('success')
       setApiCallDisplay(prev => `${prev}\n\n✓ 201 — Job queued`)

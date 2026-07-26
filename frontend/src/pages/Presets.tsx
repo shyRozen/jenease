@@ -97,7 +97,7 @@ export default function Presets() {
     const { _cluster_name, ...params } = preset.params as Record<string, any>
     const clusterName = String(_cluster_name ?? '')
     try {
-      await api.post('/jobs/trigger', { job_name: preset.job, params, cluster_name: clusterName })
+      await api.post('/jobs/trigger', { job_name: preset.job, params, cluster_name: clusterName, user_set_credentials: true })
       setToasts(t => ({ ...t, [preset.id]: '✓ Triggered!' }))
       setTimeout(() => navigate(`/clusters?highlight=${encodeURIComponent(clusterName)}`), 1200)
     } catch (e: any) {

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import { useLiveFilter } from '../hooks/useLiveFilter'
 import ModifyDrawer from '../components/ModifyDrawer'
@@ -159,6 +160,9 @@ export default function Deploy() {
   const [modifyPresetName, setModifyPresetName] = useState<string | undefined>(undefined)
 
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const [buildingPresetId, setBuildingPresetId] = useState<number | null>(null)
+  const [presetToasts, setPresetToasts] = useState<Record<number, string>>({})
 
   const { data: jobs = [], isLoading } = useQuery<DeployJob[]>({
     queryKey: ['deployments'],
@@ -195,6 +199,22 @@ export default function Deploy() {
     setModifyPresetName(preset.name)
   }
 
+  async function quickBuildPreset(p: Preset) {
+    setBuildingPresetId(p.id)
+    const { _cluster_name, ...params } = p.params as Record<string, any>
+    const clusterName = String(_cluster_name ?? '')
+    try {
+      await api.post('/jobs/trigger', { job_name: p.job, params, cluster_name: clusterName })
+      setPresetToasts(t => ({ ...t, [p.id]: '✓' }))
+      setTimeout(() => navigate(`/clusters?highlight=${encodeURIComponent(clusterName)}`), 1200)
+    } catch (e: any) {
+      setPresetToasts(t => ({ ...t, [p.id]: '✕' }))
+      setTimeout(() => setPresetToasts(t => { const n = { ...t }; delete n[p.id]; return n }), 3000)
+    } finally {
+      setBuildingPresetId(null)
+    }
+  }
+
   const { query, setQuery, filtered: textFiltered } = useLiveFilter(
     jobs,
     useCallback((j: DeployJob) => j.search_string, [])
@@ -219,6 +239,28 @@ export default function Deploy() {
   }, [textFiltered, activeChips])
 
   const sorted = useMemo(() => sortJobs(chipFiltered, sortKey, sortAsc), [chipFiltered, sortKey, sortAsc])
+
+  // Presets filtered by same search + chip state so they appear in the same results
+  const filteredPresets = useMemo(() => {
+    return presets.filter(p => {
+      const job = jobs.find(j => j.job_name === p.job)
+      if (query.trim()) {
+        const q = query.toLowerCase()
+        if (!p.name.toLowerCase().includes(q) && !job?.search_string.toLowerCase().includes(q)) return false
+      }
+      if (activeChips.size > 0 && job) {
+        const byGroup = new Map<string, string[]>()
+        for (const chip of activeChips) {
+          const group = CHIP_GROUPS.find(g => g.chips.some(c => c.key === chip))
+          const label = group?.label ?? 'other'
+          if (!byGroup.has(label)) byGroup.set(label, [])
+          byGroup.get(label)!.push(chip)
+        }
+        if (![...byGroup.values()].every(chips => chips.some(c => jobMatchesChip(job, c)))) return false
+      }
+      return true
+    })
+  }, [presets, jobs, query, activeChips])
 
   function toggleChip(key: string) {
     setActiveChips(prev => {
@@ -268,34 +310,28 @@ export default function Deploy() {
         </div>
       </div>
 
-      {/* Favorites */}
+      {/* Favorites strip */}
       {presets.length > 0 && (
         <div className="flex flex-wrap gap-2 items-center pb-3 border-b border-surface-4/50">
           <span className="text-[10px] font-mono text-accent-amber uppercase tracking-wider shrink-0">★ Favorites</span>
           {presets.map(p => {
             const matchedJob = jobs.find(j => j.job_name === p.job)
+            const clusterName = String((p.params as any)._cluster_name ?? '')
+            const isBuilding = buildingPresetId === p.id
+            const toast = presetToasts[p.id]
             return (
-              <div
-                key={p.id}
-                className="flex items-center gap-1.5 bg-surface-2 border border-accent-amber/20 rounded-md px-2 py-1"
-              >
-                <span className="text-xs font-mono text-text-primary truncate max-w-[140px]" title={p.name}>{p.name}</span>
-                {matchedJob && (
-                  <span className="text-[9px] font-mono text-text-muted shrink-0">
-                    {matchedJob.platform ?? p.job.slice(0, 12)}
-                  </span>
-                )}
-                <button
-                  onClick={() => openFromPreset(p)}
-                  disabled={!matchedJob}
-                  className="text-[10px] font-mono text-text-muted hover:text-accent-cyan px-0.5 shrink-0 disabled:opacity-30"
-                  title="Open in Modify drawer"
-                >⚙</button>
-                <button
-                  onClick={() => deletePresetMutation.mutate(p.id)}
-                  className="text-[10px] font-mono text-text-muted hover:text-accent-red px-0.5 shrink-0"
-                  title="Remove favorite"
-                >✕</button>
+              <div key={p.id} className="flex items-center gap-1 bg-surface-2 border border-accent-amber/20 rounded-md px-2 py-1">
+                <span className="text-xs font-mono text-text-primary truncate max-w-[120px]" title={p.name}>{p.name}</span>
+                {matchedJob && <span className="text-[9px] font-mono text-text-muted shrink-0">{matchedJob.platform}</span>}
+                {toast && <span className={`text-[9px] ${toast.startsWith('✓') ? 'text-accent-green' : 'text-accent-red'}`}>{toast}</span>}
+                <button onClick={() => quickBuildPreset(p)} disabled={isBuilding || !matchedJob || !clusterName}
+                  className="text-[10px] font-mono text-text-muted hover:text-accent-green px-0.5 shrink-0 disabled:opacity-30" title="Build">
+                  {isBuilding ? '…' : '▶'}
+                </button>
+                <button onClick={() => openFromPreset(p)} disabled={!matchedJob}
+                  className="text-[10px] font-mono text-text-muted hover:text-accent-cyan px-0.5 shrink-0 disabled:opacity-30" title="Modify">⚙</button>
+                <button onClick={() => deletePresetMutation.mutate(p.id)}
+                  className="text-[10px] font-mono text-text-muted hover:text-accent-red px-0.5 shrink-0" title="Remove">✕</button>
               </div>
             )
           })}
@@ -341,15 +377,71 @@ export default function Deploy() {
         </div>
       )}
 
-      {!isLoading && sorted.length === 0 && (
+      {!isLoading && sorted.length === 0 && filteredPresets.length === 0 && (
         <div className="text-center py-20">
           <p className="font-mono text-text-muted text-sm">No jobs match that search.</p>
         </div>
       )}
 
-      {!isLoading && sorted.length > 0 && view === 'grid' && (
+      {!isLoading && (sorted.length > 0 || filteredPresets.length > 0) && view === 'grid' && (
         <div className="overflow-y-auto flex-1">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 pb-6">
+            {/* Preset cards inline with regular jobs */}
+            {filteredPresets.map(p => {
+              const job = jobs.find(j => j.job_name === p.job)
+              const clusterName = String((p.params as any)._cluster_name ?? '')
+              const isBuilding = buildingPresetId === p.id
+              const toast = presetToasts[p.id]
+              return (
+                <div key={`preset-${p.id}`} className="card p-4 flex flex-col gap-3 border-accent-amber/30 hover:border-accent-amber/60 transition-colors">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-accent-amber">★</span>
+                        <p className="text-sm font-mono font-semibold text-text-primary truncate">{p.name}</p>
+                      </div>
+                      {job && <p className="text-[10px] font-mono text-text-muted mt-0.5">{job.title}</p>}
+                    </div>
+                    <button onClick={() => deletePresetMutation.mutate(p.id)}
+                      className="text-text-muted hover:text-accent-red text-lg leading-none shrink-0">✕</button>
+                  </div>
+                  {job && (
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {job.platform && <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-accent-amber/30 text-accent-amber/80 bg-accent-amber/5">{job.platform}</span>}
+                      {job.installer && <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-surface-4 text-text-muted">{job.installer.toUpperCase()}</span>}
+                      {job.storage && <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-surface-4 text-text-muted">{job.storage}</span>}
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-surface-4 text-text-muted">{job.masters}M+{job.workers === 0 ? 'Compact' : `${job.workers}W`}</span>
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-x-4 gap-y-0.5">
+                    {['OCP_VERSION', 'OCS_VERSION'].map(k => {
+                      const v = (p.params as any)[k]
+                      return v ? (
+                        <div key={k} className="flex items-center gap-1">
+                          <span className="text-[9px] font-mono text-text-muted uppercase">{k.replace('_VERSION', '')}</span>
+                          <span className="text-[10px] font-mono text-text-secondary">{v}</span>
+                        </div>
+                      ) : null
+                    })}
+                    {clusterName && (
+                      <div className="flex items-center gap-1">
+                        <span className="text-[9px] font-mono text-text-muted uppercase">Name</span>
+                        <span className="text-[10px] font-mono text-text-secondary">{clusterName}</span>
+                      </div>
+                    )}
+                  </div>
+                  {toast && <p className={`text-[10px] font-mono ${toast.startsWith('✓') ? 'text-accent-green' : 'text-accent-red'}`}>{toast}</p>}
+                  <div className="flex gap-2 mt-auto pt-1">
+                    <button onClick={() => quickBuildPreset(p)} disabled={isBuilding || !job || !clusterName}
+                      className="btn-primary flex-1 text-xs py-1.5 disabled:opacity-40">
+                      {isBuilding ? <span className="flex items-center justify-center gap-1.5"><span className="w-2.5 h-2.5 border-2 border-surface-0/30 border-t-surface-0 rounded-full animate-spin" />Sending…</span> : '▶ Build'}
+                    </button>
+                    <button onClick={() => job && openFromPreset(p)} disabled={!job}
+                      className="btn-ghost text-xs px-3 py-1.5 disabled:opacity-40">⚙ Modify</button>
+                  </div>
+                </div>
+              )
+            })}
             {sorted.map(job => (
               <JobCard key={job.job_name} job={job} onModify={name => openModify(job, name)} />
             ))}
@@ -357,16 +449,12 @@ export default function Deploy() {
         </div>
       )}
 
-      {!isLoading && sorted.length > 0 && view === 'list' && (
+      {!isLoading && (sorted.length > 0 || filteredPresets.length > 0) && view === 'list' && (
         <div className="overflow-y-auto flex-1">
           <table className="w-full text-xs font-mono table-fixed">
             <colgroup>
-              <col className="w-[38%]" />
-              <col className="w-[8%]" />
-              <col className="w-[11%]" />
-              <col className="w-[11%]" />
-              <col className="w-[14%]" />
-              <col className="w-[18%]" />
+              <col className="w-[38%]" /><col className="w-[8%]" /><col className="w-[11%]" />
+              <col className="w-[11%]" /><col className="w-[14%]" /><col className="w-[18%]" />
             </colgroup>
             <thead className="sticky top-0 bg-surface-1 z-10">
               <tr className="border-b border-surface-4">
@@ -376,6 +464,42 @@ export default function Deploy() {
               </tr>
             </thead>
             <tbody>
+              {/* Preset rows */}
+              {filteredPresets.map(p => {
+                const job = jobs.find(j => j.job_name === p.job)
+                const clusterName = String((p.params as any)._cluster_name ?? '')
+                const ocp = String((p.params as any).OCP_VERSION ?? '')
+                const ocs = String((p.params as any).OCS_VERSION ?? '')
+                const isBuilding = buildingPresetId === p.id
+                const toast = presetToasts[p.id]
+                return (
+                  <tr key={`preset-${p.id}`} className="border-b border-accent-amber/20 hover:bg-accent-amber/5 transition-colors">
+                    <td className="py-2 px-2">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-accent-amber">★</span>
+                        <span className="text-text-primary font-semibold">{p.name}</span>
+                        {job?.platform && <span className="text-text-muted">{job.platform}</span>}
+                        {job?.storage && <span className="text-text-muted">· {job.storage}</span>}
+                      </div>
+                    </td>
+                    <td className="py-2 px-2 text-text-muted">{job ? `${job.masters}M+${job.workers === 0 ? 'C' : `${job.workers}W`}` : '—'}</td>
+                    <td className="py-2 px-2 text-text-muted">{ocp}</td>
+                    <td className="py-2 px-2 text-text-muted">{ocs}</td>
+                    <td className="py-2 px-2 text-text-secondary truncate">{clusterName}</td>
+                    <td className="py-2 px-2">
+                      <div className="flex gap-1 items-center">
+                        {toast && <span className={`text-[9px] ${toast.startsWith('✓') ? 'text-accent-green' : 'text-accent-red'}`}>{toast}</span>}
+                        <button onClick={() => quickBuildPreset(p)} disabled={isBuilding || !job || !clusterName}
+                          className="btn-primary text-[10px] py-1 px-2 disabled:opacity-40">{isBuilding ? '…' : '▶ Build'}</button>
+                        <button onClick={() => job && openFromPreset(p)} disabled={!job}
+                          className="btn-ghost text-[10px] py-1 px-1.5 disabled:opacity-40">⚙</button>
+                        <button onClick={() => deletePresetMutation.mutate(p.id)}
+                          className="text-text-muted hover:text-accent-red text-[10px] px-1">✕</button>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
               {sorted.map(job => (
                 <JobListRow key={job.job_name} job={job} onModify={name => openModify(job, name)} />
               ))}

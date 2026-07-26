@@ -117,21 +117,19 @@ export default function NotificationBell() {
       <div ref={panelRef} className="relative">
         <button
           onClick={() => setOpen(o => !o)}
-          className="relative flex items-center gap-2 w-full px-2 py-1.5 rounded hover:bg-surface-2 transition-colors"
+          className="relative p-2 rounded-lg hover:bg-surface-2 transition-colors flex items-center gap-1.5"
+          title="Notifications"
         >
-          <span className="text-base relative">
-            🔔
-            {unread > 0 && (
-              <span className="absolute -top-1 -right-1 bg-accent-red text-white text-[9px] font-bold rounded-full w-4 h-4 flex items-center justify-center leading-none">
-                {unread > 9 ? '9+' : unread}
-              </span>
-            )}
-          </span>
-          <span className="text-[11px] font-mono text-text-muted">Notifications</span>
+          <span className="text-xl leading-none select-none">🔔</span>
+          {unread > 0 && (
+            <span className="absolute top-0.5 right-0.5 bg-accent-red text-white text-[9px] font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center leading-none px-0.5">
+              {unread > 9 ? '9+' : unread}
+            </span>
+          )}
         </button>
 
         {open && (
-          <div className="absolute bottom-full left-0 mb-1 w-80 bg-surface-0 border border-surface-4 rounded-lg shadow-2xl z-50 flex flex-col max-h-96 overflow-hidden">
+          <div className="absolute top-full right-0 mt-1 w-80 bg-surface-0 border border-surface-4 rounded-lg shadow-2xl z-50 flex flex-col max-h-96 overflow-hidden">
             <div className="flex items-center justify-between px-3 py-2 border-b border-surface-4">
               <span className="text-[10px] font-mono text-text-muted uppercase tracking-wider">Notifications</span>
               {unread > 0 && (

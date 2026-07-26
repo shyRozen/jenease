@@ -57,11 +57,6 @@ export default function Layout() {
           ))}
         </nav>
 
-        {/* Notification bell */}
-        <div className="border-t border-surface-4 px-2 py-2">
-          <NotificationBell />
-        </div>
-
         {/* User */}
         <div className="border-t border-surface-4 px-4 py-3">
           <p className="text-xs font-mono text-text-muted mb-1">signed in as</p>
@@ -76,8 +71,14 @@ export default function Layout() {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-hidden bg-surface-1 min-h-0">
-        <Outlet />
+      <main className="flex-1 flex flex-col overflow-hidden bg-surface-1 min-h-0">
+        {/* Top bar with bell */}
+        <div className="flex items-center justify-end px-4 h-10 border-b border-surface-4 shrink-0 bg-surface-1">
+          <NotificationBell />
+        </div>
+        <div className="flex-1 overflow-hidden min-h-0">
+          <Outlet />
+        </div>
       </main>
     </div>
   )

@@ -794,18 +794,29 @@ export default function WorkloadPanel({
       } catch { /* best-effort */ }
     }
 
+    const workloadList = seqItems.flatMap(({ id: _id, count, ...rest }) =>
+      Array.from({ length: count ?? 1 }, () => ({ ...rest }))
+    )
+
     if (seqSync) {
       // Sync mode: all pods come up together, offsets fire after all-ready
       try {
-        const workloads = seqItems.flatMap(({ id: _id, count, ...rest }) =>
-          Array.from({ length: count ?? 1 }, () => ({ ...rest }))
-        )
         await api.post(`/clusters/${clusterName}/workloads/sync-launch`, {
-          workloads, session_id: sessionId, kubeconfig_url: kubeconfigUrl,
+          workloads: workloadList, session_id: sessionId, kubeconfig_url: kubeconfigUrl,
         })
         await refetch()
       } catch (e: any) {
         console.error('[sequence sync] failed:', e?.message)
+      }
+
+      // Fire same sequence to extra clusters in parallel (best-effort)
+      if (extraClusters.size > 0) {
+        const extras = otherClusters.filter(c => extraClusters.has(c.cluster_name))
+        await Promise.allSettled(extras.map(c =>
+          api.post(`/clusters/${c.cluster_name}/workloads/sync-launch`, {
+            workloads: workloadList, session_id: null, kubeconfig_url: c.kubeconfig_url,
+          })
+        ))
       }
     } else {
       // Non-sync: staggered creation at each item's offset (legacy behaviour)
@@ -819,6 +830,13 @@ export default function WorkloadPanel({
         api.post(`/clusters/${clusterName}/workloads`, { ...item, node_name: item.node_name ?? '', session_id: sessionId, kubeconfig_url: kubeconfigUrl })
           .then(() => refetch())
           .catch((e: any) => console.error(`[sequence] ${item.workload_type} failed:`, e?.message))
+        // Fire to extra clusters at the same offset (best-effort, non-sync only)
+        if (extraClusters.size > 0) {
+          otherClusters.filter(c => extraClusters.has(c.cluster_name)).forEach(c =>
+            api.post(`/clusters/${c.cluster_name}/workloads`, { ...item, node_name: '', session_id: null, kubeconfig_url: c.kubeconfig_url })
+              .catch(() => {})
+          )
+        }
       }
     }
     setSeqRunning(false)
@@ -1221,10 +1239,47 @@ export default function WorkloadPanel({
             )}
           </div>
 
+          {/* Multi-cluster for sequence */}
+          <div>
+            <button
+              onClick={() => setShowExtraClusters(s => !s)}
+              className="flex items-center gap-1.5 text-[9px] font-mono text-text-muted hover:text-accent-cyan transition-colors"
+            >
+              <span>{showExtraClusters ? '▾' : '▸'}</span>
+              <span>Also launch on other clusters</span>
+              {extraClusters.size > 0 && (
+                <span className="px-1 py-0.5 rounded bg-accent-cyan/20 text-accent-cyan">{extraClusters.size}</span>
+              )}
+            </button>
+            {showExtraClusters && (
+              <div className="mt-1.5 pl-3 space-y-1 border-l border-surface-4">
+                {otherClusters.length === 0 ? (
+                  <p className="text-[9px] font-mono text-text-muted italic">No other active clusters</p>
+                ) : otherClusters.map(c => (
+                  <label key={c.cluster_name} className="flex items-center gap-1.5 cursor-pointer group">
+                    <input
+                      type="checkbox"
+                      checked={extraClusters.has(c.cluster_name)}
+                      onChange={e => setExtraClusters(prev => {
+                        const next = new Set(prev)
+                        e.target.checked ? next.add(c.cluster_name) : next.delete(c.cluster_name)
+                        return next
+                      })}
+                      className="accent-accent-cyan"
+                    />
+                    <span className="text-[10px] font-mono text-text-secondary group-hover:text-text-primary">
+                      {c.cluster_name}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div className="flex gap-1.5">
             <button onClick={handleRunSequence} disabled={seqRunning}
               className="flex-1 text-[10px] font-mono py-1 rounded border border-accent-green/40 text-accent-green hover:bg-accent-green/10 transition-colors disabled:opacity-50">
-              {seqRunning ? '⏳ Running…' : '▶ Run'}
+              {seqRunning ? '⏳ Running…' : extraClusters.size > 0 ? `▶ Run on ${1 + extraClusters.size} clusters` : '▶ Run'}
             </button>
             <button onClick={handleSaveSequence}
               className="flex-1 text-[10px] font-mono py-1 rounded border border-accent-amber/40 text-accent-amber hover:bg-accent-amber/10 transition-colors">

@@ -27,31 +27,22 @@ import routers.jobs as jobs_module
 
 
 async def _warm_catalog():
-    """Build the job catalog and scan Jenkins for known usernames at startup."""
-    import os
-    token = os.environ.get("JENKINS_WARM_TOKEN", "")
-    username = os.environ.get("JENKINS_WARM_USER", "")
-    if not token or not username:
-        print("[startup] No JENKINS_WARM_TOKEN/USER set — catalog and user scan skipped", flush=True)
-        return
-    jenkins = JenkinsClient(username, token)
-    # Catalog
+    """Build the job catalog at startup using a minimal service account."""
     try:
-        print("[startup] Warming job catalog…", flush=True)
+        print("[startup] Warming job catalog in background…", flush=True)
+        import os
+        token = os.environ.get("JENKINS_WARM_TOKEN", "")
+        username = os.environ.get("JENKINS_WARM_USER", "")
+        if not token or not username:
+            print("[startup] No JENKINS_WARM_TOKEN/USER set — catalog will build on first Deploy visit", flush=True)
+            return
+        jenkins = JenkinsClient(username, token)
         catalog = await _build_catalog(jenkins)
         jobs_module._catalog = catalog
         jobs_module._catalog_ts = __import__('time').time()
         print(f"[startup] Catalog ready: {len(catalog)} jobs", flush=True)
     except Exception as e:
-        print(f"[startup] Catalog warm failed: {e}", flush=True)
-    # User registry — scan last 3 weeks of Jenkins builds
-    try:
-        from routers.users import scan_jenkins_users
-        print("[startup] Scanning Jenkins builds for user registry…", flush=True)
-        added = await scan_jenkins_users(jenkins)
-        print(f"[startup] User scan done ({added} new users)", flush=True)
-    except Exception as e:
-        print(f"[startup] User scan failed: {e}", flush=True)
+        print(f"[startup] Catalog warm failed (will build on first visit): {e}", flush=True)
 
 
 @asynccontextmanager

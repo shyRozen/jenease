@@ -1296,14 +1296,30 @@ def _job_and_num_from_url(build_url: str) -> tuple[str, int]:
     return "", 0
 
 
+def _jenkins_base_from_url(build_url: str) -> str:
+    """Extract the Jenkins base URL (scheme + host) from a build URL."""
+    m = re.match(r'(https?://[^/]+)', build_url)
+    return m.group(1) if m else ""
+
+
 @router.post("/{cluster_name}/destroy")
 async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict = Depends(get_session)):
-    """Trigger qe-destroy-ocs-cluster, carrying over params from the original deploy build."""
+    """Trigger qe-destroy-ocs-cluster on the same Jenkins instance that ran the deploy."""
     jenkins = _make_client(session)
     username = session["username"]
 
     if not cluster_name.lower().startswith(username.lower()):
         raise HTTPException(403, "Not your cluster")
+
+    # Use the Jenkins instance from the deploy build URL.
+    # The deploy may be on a different host (e.g. ocs4) than the one Jenease is configured with.
+    destroy_jenkins = jenkins
+    if body.build_url:
+        base = _jenkins_base_from_url(body.build_url)
+        if base and base != settings.jenkins_url.rstrip("/"):
+            destroy_jenkins = JenkinsClient(session["username"], session["token"])
+            destroy_jenkins.base = base
+            print(f"[DESTROY] using Jenkins base from build_url: {base}", flush=True)
 
     deploy_params: dict = {}
     found_job = DEPLOY_JOB
@@ -1338,47 +1354,27 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
     print(f"[DESTROY] user={username} → {DESTROY_JOB} cluster={cluster_name} "
           f"(params from {found_job if deploy_params else 'none found'})", flush=True)
 
-    # Fetch the destroy job's accepted param names, then pass every deploy param that matches.
-    # This ensures we don't miss required params (OCS_CI_REPOSITORY, JOBS_REPOSITORY, etc.)
-    # and don't send unknown ones that could cause a 500.
-    destroy_param_names: set[str] = set()
-    try:
-        schema = await jenkins.get_job_params_schema(DESTROY_JOB)
-        destroy_param_names = {p.get("name", "") for p in schema}
-    except Exception:
-        pass
-
-    # Seed with all deploy params that the destroy job accepts
-    params: dict = {}
-    if deploy_params and destroy_param_names:
-        for k, v in deploy_params.items():
-            if k in destroy_param_names and v not in (None, ""):
-                params[k] = v
-
-    # Always set CLUSTER_NAME (override whatever came from the deploy build)
-    params["CLUSTER_NAME"] = cluster_name
-    # Override boolean flags from the request body
+    # Minimal params — matches the working curl from obsidian docs.
+    # The destroy job only needs CLUSTER_NAME + CREDENTIALS_CONF to identify the cluster/platform.
+    params: dict = {
+        "CLUSTER_NAME": cluster_name,
+        "CREDENTIALS_CONF": deploy_params.get("CREDENTIALS_CONF", ""),
+    }
     if body.force_jslave_destroy:
         params["FORCE_JSLAVE_DESTROY"] = "true"
-    elif "FORCE_JSLAVE_DESTROY" in params:
-        del params["FORCE_JSLAVE_DESTROY"]
     if body.longevity_cluster:
         params["LONGEVITY_CLUSTER"] = "true"
-    elif "LONGEVITY_CLUSTER" in params:
-        del params["LONGEVITY_CLUSTER"]
     if body.do_not_release_lock:
         params["DO_NOT_RELEASE_LOCK"] = "true"
-    elif "DO_NOT_RELEASE_LOCK" in params:
-        del params["DO_NOT_RELEASE_LOCK"]
 
     params = {k: v for k, v in params.items() if v not in (None, "")}
-    print(f"[DESTROY] sending {len(params)} params: {sorted(params.keys())}", flush=True)
+    print(f"[DESTROY] → {destroy_jenkins.base}/job/{DESTROY_JOB} params={sorted(params.keys())}", flush=True)
 
     try:
-        queue_item = await jenkins.trigger_job(DESTROY_JOB, params, skip_crumb=True)
+        queue_item = await destroy_jenkins.trigger_job(DESTROY_JOB, params, skip_crumb=True)
     except Exception as e:
         print(f"[DESTROY ERROR] {e}", flush=True)
         raise HTTPException(502, f"Jenkins destroy failed: {e}")
 
-    print(f"[DESTROY OK] queue_item={queue_item} cluster={cluster_name}", flush=True)
+    print(f"[DESTROY OK] queue_item={queue_item} cluster={cluster_name} on {destroy_jenkins.base}", flush=True)
     return {"queue_item": queue_item, "job": DESTROY_JOB, "cluster_name": cluster_name}

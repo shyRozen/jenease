@@ -52,6 +52,40 @@ class Preset(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class User(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    username: str = Field(unique=True, index=True)
+    full_name: str = ""
+    last_seen: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ClusterShare(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    cluster_name: str = Field(index=True)
+    shared_by: str
+    shared_with: str  # username or "*" for all
+    # Snapshot of cluster at share time so recipient can access without extra Jenkins calls
+    kubeconfig_url: str = ""
+    console_url: str = ""
+    ocp_version: str = ""
+    ocs_version: str = ""
+    platform_conf: str = ""
+    credentials_conf: str = ""
+    build_url: str = ""
+    build_num: int = 0
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Notification(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    username: str = Field(index=True)  # recipient
+    from_user: str
+    cluster_name: str
+    message: str
+    read: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 # --- API response shapes (Pydantic only, not DB) ---
 
 class UserInfo(SQLModel):

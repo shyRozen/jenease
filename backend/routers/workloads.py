@@ -13,6 +13,7 @@ from auth import get_session
 from database import engine
 from jenkins import JenkinsClient
 from datetime import datetime
+from routers.clusters import _has_cluster_access
 from models import Workload, WorkloadSession
 from workload_runner import (
     create_and_stream_workload,
@@ -116,7 +117,7 @@ async def create(
     session: dict = Depends(get_session),
 ):
     username = session["username"]
-    if not cluster_name.lower().startswith(username.lower()):
+    if not _has_cluster_access(username, cluster_name):
         raise HTTPException(403, "Not your cluster")
 
     if body.kubeconfig_url:
@@ -216,7 +217,7 @@ async def sync_launch(
     import uuid as _uuid
 
     username = session["username"]
-    if not cluster_name.lower().startswith(username.lower()):
+    if not _has_cluster_access(username, cluster_name):
         raise HTTPException(403, "Not your cluster")
     if not body.workloads:
         raise HTTPException(400, "No workloads specified")
@@ -424,7 +425,7 @@ async def purge_orphaned(
 ):
     """Find and delete all jenease-wl-* namespaces in the cluster (orphan cleanup)."""
     username = session["username"]
-    if not cluster_name.lower().startswith(username.lower()):
+    if not _has_cluster_access(username, cluster_name):
         raise HTTPException(403, "Not your cluster")
 
     jenkins = _make_jenkins(session)

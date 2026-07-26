@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import NodeDiagram from './NodeDiagram'
 import DestroyDrawer from './DestroyDrawer'
+import ShareDrawer from './ShareDrawer'
 
 interface ClusterInfo {
   cluster_name: string
@@ -26,6 +27,8 @@ interface ClusterInfo {
   destroy_failed?: boolean
   destroy_build_url?: string
   destroy_build_num?: number
+  is_shared?: boolean
+  shared_by?: string
 }
 
 interface HealthData {
@@ -219,6 +222,7 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
   const queryClient = useQueryClient()
   const [abortState, setAbortState] = useState<'idle' | 'confirm' | 'aborting' | 'done'>('idle')
   const [destroyOpen, setDestroyOpen] = useState(false)
+  const [shareOpen, setShareOpen] = useState(false)
 
   async function handleAbort(e: React.MouseEvent) {
     e.preventDefault()
@@ -283,6 +287,9 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
       </div>
 
       {platform && <p className="text-xs font-mono text-text-secondary truncate">{platform}</p>}
+      {cluster.is_shared && cluster.shared_by && (
+        <p className="text-[10px] font-mono text-accent-cyan/70">🤝 Shared by {cluster.shared_by}</p>
+      )}
 
       {/* Resource locker status */}
       {lockerEntry?.status === 'LOCKED' && (
@@ -386,12 +393,36 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
               ↓ kubeconfig
             </a>
           )}
+          {isOwner && !cluster.is_shared && (
+            <button
+              onClick={e => { e.preventDefault(); setShareOpen(true) }}
+              className="text-xs font-mono text-accent-cyan/40 hover:text-accent-cyan transition-colors"
+            >
+              ↗ Share
+            </button>
+          )}
         </div>
         <div onClick={e => e.stopPropagation()}>
           <PwField password={cluster.kubeadmin_password} />
         </div>
       </div>
     </Link>
+
+    {/* Share drawer */}
+    {shareOpen && (
+      <ShareDrawer
+        clusterName={cluster.cluster_name}
+        kubeconfigUrl={cluster.kubeconfig_url}
+        consoleUrl={cluster.console_url}
+        ocpVersion={cluster.ocp_version}
+        ocsVersion={cluster.ocs_version}
+        platformConf={cluster.platform_conf}
+        credentialsConf={cluster.credentials_conf}
+        buildUrl={cluster.build_url}
+        buildNum={cluster.build_num}
+        onClose={() => setShareOpen(false)}
+      />
+    )}
 
     {/* Destroy drawer — rendered outside the Link to avoid navigation */}
     {destroyOpen && (

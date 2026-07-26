@@ -3,6 +3,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import type { User } from '../types'
 import { closeStream } from '../lib/clusterStreamManager'
+import NotificationBell from './NotificationBell'
 
 const NAV = [
   { to: '/clusters',     label: 'My Clusters',  icon: '⬡' },
@@ -55,6 +56,11 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
+
+        {/* Notification bell */}
+        <div className="border-t border-surface-4 px-2 py-2">
+          <NotificationBell />
+        </div>
 
         {/* User */}
         <div className="border-t border-surface-4 px-4 py-3">

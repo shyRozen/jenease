@@ -108,6 +108,22 @@ def _cluster_name_from_desc(description: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _has_cluster_access(username: str, cluster_name: str) -> bool:
+    """True if user owns the cluster (name prefix) or has a share grant."""
+    if cluster_name.lower().startswith(username.lower()):
+        return True
+    from sqlmodel import Session as _Session, select as _select, or_ as _or
+    from database import engine as _engine
+    from models import ClusterShare as _CS
+    with _Session(_engine) as db:
+        return db.exec(
+            _select(_CS).where(
+                _CS.cluster_name == cluster_name,
+                _or(_CS.shared_with == username, _CS.shared_with == "*"),
+            )
+        ).first() is not None
+
+
 async def _get_build_params_safe(jenkins: JenkinsClient, job: str, build_num: int) -> dict:
     try:
         return await jenkins.get_build_params(job, build_num)
@@ -240,7 +256,45 @@ async def active_clusters(session: dict = Depends(get_session)):
             result["destroy_build_num"] = failed_destroys[cname]["build_num"]
         return result
 
-    results = await asyncio.gather(*[enrich(info) for info in seen.values()])
+    results = list(await asyncio.gather(*[enrich(info) for info in seen.values()]))
+
+    # Append clusters shared with this user (using snapshot data stored at share time)
+    from sqlmodel import Session as _Session, select as _select, or_ as _or
+    from database import engine as _engine
+    from models import ClusterShare as _CS
+    with _Session(_engine) as db:
+        shares = db.exec(
+            _select(_CS).where(
+                _or(_CS.shared_with == username, _CS.shared_with == "*")
+            )
+        ).all()
+    seen_names = {r["cluster_name"] for r in results}
+    for s in shares:
+        if s.cluster_name in seen_names:
+            continue  # user already sees it as their own
+        results.append({
+            "cluster_name": s.cluster_name,
+            "build_num": s.build_num,
+            "build_url": s.build_url,
+            "building": False,
+            "result": "SUCCESS",
+            "timestamp": int(s.created_at.timestamp() * 1000),
+            "duration": None,
+            "kubeconfig_url": s.kubeconfig_url,
+            "console_url": s.console_url,
+            "logs_url": None,
+            "kubeadmin_password": None,
+            "agent_ip": None,
+            "ocp_version": s.ocp_version,
+            "ocs_version": s.ocs_version,
+            "credentials_conf": s.credentials_conf,
+            "platform_conf": s.platform_conf,
+            "osd_size": "",
+            "topology": {"masters": 0, "workers": 0},
+            "is_shared": True,
+            "shared_by": s.shared_by,
+        })
+
     return sorted(results, key=lambda x: x.get("timestamp") or 0, reverse=True)
 
 
@@ -1196,7 +1250,7 @@ async def download_kubeconfig(cluster_name: str, session: dict = Depends(get_ses
     jenkins = _make_client(session)
     username = session["username"]
 
-    if not cluster_name.lower().startswith(username.lower()):
+    if not _has_cluster_access(username, cluster_name):
         from fastapi import HTTPException
         raise HTTPException(403, "Not your cluster")
 
@@ -1253,7 +1307,7 @@ async def abort_cluster_build(cluster_name: str, session: dict = Depends(get_ses
     jenkins = _make_client(session)
     username = session["username"]
 
-    if not cluster_name.lower().startswith(username.lower()):
+    if not _has_cluster_access(username, cluster_name):
         from fastapi import HTTPException
         raise HTTPException(403, "Not your cluster")
 
@@ -1308,7 +1362,7 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
     jenkins = _make_client(session)
     username = session["username"]
 
-    if not cluster_name.lower().startswith(username.lower()):
+    if not _has_cluster_access(username, cluster_name):
         raise HTTPException(403, "Not your cluster")
 
     destroy_jenkins = jenkins

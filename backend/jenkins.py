@@ -134,7 +134,22 @@ class JenkinsClient:
         return r
 
     async def trigger_job(self, job: str, params: dict, skip_crumb: bool = False) -> int:
-        r = await self._post(f"/job/{job}/buildWithParameters", params, skip_crumb=skip_crumb)
+        if skip_crumb:
+            # No pre-flight crumb GET — raw POST, exactly like the working curl.
+            # The crumb GET establishes a session cookie that then requires CSRF validation,
+            # breaking API-token-based triggers. Without it Jenkins is crumb-exempt for tokens.
+            async with httpx.AsyncClient(verify=False, timeout=30.0) as c:
+                r = await c.post(
+                    f"{self.base}/job/{job}/buildWithParameters",
+                    auth=self.auth,
+                    data=params,
+                )
+            if not r.is_success:
+                body = r.text
+                err = re.sub(r'<[^>]+>', '', (re.search(r'<h2[^>]*>(.*?)</h2>', body, re.DOTALL | re.IGNORECASE) or re.search(r'', body) or type('', (), {'group': lambda s, n: body[:400]})()).group(1) if '<h2' in body else body[:400]).strip() or body[:400]
+                raise httpx.HTTPStatusError(f"{r.status_code} from {r.url} — {err[:400]}", request=r.request, response=r)
+        else:
+            r = await self._post(f"/job/{job}/buildWithParameters", params)
         location = r.headers.get("Location", "")
         match = re.search(r"/queue/item/(\d+)/", location)
         return int(match.group(1)) if match else 0

@@ -1311,15 +1311,16 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
     if not cluster_name.lower().startswith(username.lower()):
         raise HTTPException(403, "Not your cluster")
 
-    # Use the Jenkins instance from the deploy build URL.
-    # The deploy may be on a different host (e.g. ocs4) than the one Jenease is configured with.
+    # Use DESTROY_JENKINS_URL if configured (destroy job may live on a different Jenkins instance).
+    # Falls back to the cluster's build_url host, then finally the configured jenkins_url.
     destroy_jenkins = jenkins
-    if body.build_url:
-        base = _jenkins_base_from_url(body.build_url)
-        if base and base != settings.jenkins_url.rstrip("/"):
-            destroy_jenkins = JenkinsClient(session["username"], session["token"])
-            destroy_jenkins.base = base
-            print(f"[DESTROY] using Jenkins base from build_url: {base}", flush=True)
+    destroy_base = (settings.destroy_jenkins_url or "").rstrip("/")
+    if not destroy_base and body.build_url:
+        destroy_base = _jenkins_base_from_url(body.build_url)
+    if destroy_base and destroy_base != settings.jenkins_url.rstrip("/"):
+        destroy_jenkins = JenkinsClient(session["username"], session["token"])
+        destroy_jenkins.base = destroy_base
+    print(f"[DESTROY] target: {destroy_jenkins.base}/job/{DESTROY_JOB}", flush=True)
 
     deploy_params: dict = {}
     found_job = DEPLOY_JOB

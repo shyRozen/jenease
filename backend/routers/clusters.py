@@ -1347,11 +1347,30 @@ async def destroy_cluster(cluster_name: str, body: DestroyRequest, session: dict
     print(f"[DESTROY] user={username} → {DESTROY_JOB} cluster={cluster_name} "
           f"(params from {found_job if deploy_params else 'none found'})", flush=True)
 
-    # Minimal params — matches the working curl from obsidian docs.
-    # The destroy job only needs CLUSTER_NAME + CREDENTIALS_CONF to identify the cluster/platform.
+    # Fetch destroy job's valid CREDENTIALS_CONF choices — some deploy credentials
+    # (e.g. vSphere8-DC-CP-DUAL-STACK-VC1) don't exist in the destroy job's dropdown,
+    # causing a 500. Fall back to the closest valid credential.
+    cred = deploy_params.get("CREDENTIALS_CONF", "")
+    try:
+        schema = await jenkins.get_job_params_schema(DESTROY_JOB)
+        valid_creds = next(
+            (p.get("choices", []) for p in schema if p.get("name") == "CREDENTIALS_CONF"),
+            []
+        )
+        if cred and valid_creds and cred not in valid_creds:
+            # Try stripping variant suffixes to find the base credential
+            for suffix in ("-DUAL-STACK", "-dual-stack", "-IPv6", "-ipv6"):
+                candidate = cred.replace(suffix, "")
+                if candidate in valid_creds:
+                    print(f"[DESTROY] CREDENTIALS_CONF {cred!r} not valid → using {candidate!r}", flush=True)
+                    cred = candidate
+                    break
+    except Exception:
+        pass
+
     params: dict = {
         "CLUSTER_NAME": cluster_name,
-        "CREDENTIALS_CONF": deploy_params.get("CREDENTIALS_CONF", ""),
+        "CREDENTIALS_CONF": cred,
     }
     if body.force_jslave_destroy:
         params["FORCE_JSLAVE_DESTROY"] = "true"

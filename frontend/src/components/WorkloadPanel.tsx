@@ -362,6 +362,8 @@ export default function WorkloadPanel({
   const [launchError, setLaunchError] = useState('')
   const [launchCount, setLaunchCount] = useState(1)
   const [launchSync,  setLaunchSync]  = useState(true)  // default ON
+  const [extraClusters, setExtraClusters] = useState<Set<string>>(new Set())
+  const [showExtraClusters, setShowExtraClusters] = useState(false)
 
   // Node pin state
   const [nodeName, setNodeName] = useState<string>('')
@@ -406,6 +408,18 @@ export default function WorkloadPanel({
     enabled: showLauncher && !!kubeconfigUrl,
   })
   const workerNodes = workerNodesData?.nodes ?? []
+
+  // Other clusters owned by this user (for multi-cluster launch)
+  const myUsername = queryClient.getQueryData<{ username: string }>(['me'])?.username ?? ''
+  const { data: allActiveClusters = [] } = useQuery<{ cluster_name: string; kubeconfig_url: string }[]>({
+    queryKey: ['clusters'],
+    queryFn: () => api.get('/clusters/active'),
+    staleTime: 30_000,
+    enabled: showLauncher && showExtraClusters,
+  })
+  const otherClusters = allActiveClusters.filter(
+    c => c.cluster_name !== clusterName && c.cluster_name.toLowerCase().startsWith(myUsername.toLowerCase()) && !!c.kubeconfig_url
+  )
 
   const cephAggRef = useRef<{r: number; w: number}>({r: 0, w: 0})
   cephAggRef.current = cephAgg ?? {r: 0, w: 0}
@@ -603,17 +617,31 @@ export default function WorkloadPanel({
         num_jobs: numJobs, iodepth, duration_sec: duration, obj_size_mb: objSizeMb,
         workers, engine, direct, node_name: nodeName, offset_sec: 0,
       }
+      const workloadList = Array.from({ length: launchCount }, () => ({ ...params }))
+
+      // Primary cluster launch
       if (launchSync || launchCount > 1) {
-        // Sync-launch: all pods come up first, then IO fires together
-        const workloads = Array.from({ length: launchCount }, () => ({ ...params }))
         await api.post(`/clusters/${clusterName}/workloads/sync-launch`, {
-          workloads, session_id: recordingId, kubeconfig_url: kubeconfigUrl,
+          workloads: workloadList, session_id: recordingId, kubeconfig_url: kubeconfigUrl,
         })
       } else {
         await api.post(`/clusters/${clusterName}/workloads`, {
           ...params, session_id: recordingId, kubeconfig_url: kubeconfigUrl,
         })
       }
+
+      // Fire same workload to each selected extra cluster (parallel, best-effort)
+      if (extraClusters.size > 0) {
+        const extras = otherClusters.filter(c => extraClusters.has(c.cluster_name))
+        await Promise.allSettled(extras.map(c =>
+          api.post(`/clusters/${c.cluster_name}/workloads/sync-launch`, {
+            workloads: workloadList,
+            session_id: null,
+            kubeconfig_url: c.kubeconfig_url,
+          })
+        ))
+      }
+
       await refetch()
     } catch (e: any) {
       setLaunchError((e as Error).message)
@@ -1074,6 +1102,43 @@ export default function WorkloadPanel({
           )}
         </div>
 
+        {/* Multi-cluster launch */}
+        <div>
+          <button
+            onClick={() => setShowExtraClusters(s => !s)}
+            className="flex items-center gap-1.5 text-[9px] font-mono text-text-muted hover:text-accent-cyan transition-colors"
+          >
+            <span>{showExtraClusters ? '▾' : '▸'}</span>
+            <span>Also launch on other clusters</span>
+            {extraClusters.size > 0 && (
+              <span className="px-1 py-0.5 rounded bg-accent-cyan/20 text-accent-cyan">{extraClusters.size}</span>
+            )}
+          </button>
+          {showExtraClusters && (
+            <div className="mt-1.5 pl-3 space-y-1 border-l border-surface-4">
+              {otherClusters.length === 0 ? (
+                <p className="text-[9px] font-mono text-text-muted italic">No other active clusters</p>
+              ) : otherClusters.map(c => (
+                <label key={c.cluster_name} className="flex items-center gap-1.5 cursor-pointer group">
+                  <input
+                    type="checkbox"
+                    checked={extraClusters.has(c.cluster_name)}
+                    onChange={e => setExtraClusters(prev => {
+                      const next = new Set(prev)
+                      e.target.checked ? next.add(c.cluster_name) : next.delete(c.cluster_name)
+                      return next
+                    })}
+                    className="accent-accent-cyan"
+                  />
+                  <span className="text-[10px] font-mono text-text-secondary group-hover:text-text-primary">
+                    {c.cluster_name}
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+
         {launchError && (
           <p className="text-[10px] font-mono text-accent-red">{launchError}</p>
         )}
@@ -1088,7 +1153,7 @@ export default function WorkloadPanel({
               <span className="w-3 h-3 border-2 border-accent-cyan/30 border-t-accent-cyan rounded-full animate-spin" />
               Launching…
             </span>
-          ) : launchCount > 1 ? `▶ Launch ${launchCount}× ${type.toUpperCase()}` : '▶ Launch Workload'}
+          ) : launchCount > 1 ? `▶ Launch ${launchCount}× ${type.toUpperCase()}${extraClusters.size > 0 ? ` on ${1 + extraClusters.size} clusters` : ''}` : extraClusters.size > 0 ? `▶ Launch on ${1 + extraClusters.size} clusters` : '▶ Launch Workload'}
         </button>
 
         {/* Add to Sequence */}

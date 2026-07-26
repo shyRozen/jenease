@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import NodeDiagram from './NodeDiagram'
@@ -36,6 +36,7 @@ interface HealthData {
   degraded_reason?: string | null
   nodes?: { role: string; ready: boolean; name: string }[]
   odf?: { phase: string; health: string }
+  ceph_capacity?: { health?: string }
   osd_count?: number
 }
 
@@ -190,9 +191,47 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
     queryKey: ['health', cluster.cluster_name],
     queryFn: () => api.get(`/clusters/${cluster.cluster_name}/health`),
     enabled: (!cluster.building || isLateStage) && !cluster.destroying,
-    staleTime: 60_000,
+    staleTime: 5_000,
+    refetchInterval: 8_000,
     retry: false,
   })
+
+  // Bidirectional health transition detection — fire alert on state changes only
+  const prevHealthRef = useRef<{ ceph: string; phase: string } | null>(null)
+  useEffect(() => {
+    if (!health) return
+    const ceph = health.ceph_capacity?.health ?? ''
+    const phase = health.odf?.phase ?? ''
+    const prev = prevHealthRef.current
+
+    if (prev !== null) {
+      const messages: string[] = []
+
+      // Ceph health: degradation and recovery
+      if (prev.ceph !== ceph) {
+        if ((ceph.includes('WARN') || ceph.includes('ERR')) && prev.ceph === 'HEALTH_OK') {
+          messages.push(`⚠ ${cluster.cluster_name}: Ceph health degraded to ${ceph}`)
+        } else if (ceph === 'HEALTH_OK' && (prev.ceph.includes('WARN') || prev.ceph.includes('ERR'))) {
+          messages.push(`✓ ${cluster.cluster_name}: Ceph health recovered (HEALTH_OK)`)
+        }
+      }
+
+      // StorageCluster phase: progressing and recovery
+      if (prev.phase !== phase) {
+        if (phase === 'Progressing' && prev.phase !== 'Progressing') {
+          messages.push(`⟳ ${cluster.cluster_name}: StorageCluster is Progressing`)
+        } else if (phase === 'Ready' && prev.phase === 'Progressing') {
+          messages.push(`✓ ${cluster.cluster_name}: StorageCluster recovered to Ready`)
+        }
+      }
+
+      for (const msg of messages) {
+        api.post('/notifications/alert', { cluster_name: cluster.cluster_name, message: msg }).catch(() => {})
+      }
+    }
+
+    prevHealthRef.current = { ceph, phase }
+  }, [health])
 
   // Prefetch Level 2 detail data in the background as soon as health resolves.
   // TanStack Query caches this under ['details', name] — same key ClusterDetail uses,

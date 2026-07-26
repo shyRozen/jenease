@@ -1,16 +1,18 @@
-"""Real-time notifications — SSE stream + CRUD."""
+"""Real-time notifications — SSE stream + CRUD + cluster health alerts."""
 import asyncio
 import json
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from typing import Dict, List
 
 from fastapi import APIRouter, Depends
-from sqlmodel import Session, select
+from pydantic import BaseModel
+from sqlmodel import Session, select, or_
 from sse_starlette.sse import EventSourceResponse
 
 from auth import get_session
 from database import engine
-from models import Notification
+from models import ClusterShare, Notification, User
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 
@@ -118,3 +120,81 @@ def mark_all_read(session: dict = Depends(get_session)):
             db.add(n)
         db.commit()
     return {"ok": True}
+
+
+class AlertRequest(BaseModel):
+    cluster_name: str
+    message: str
+
+
+def _owner_from_cluster(cluster_name: str) -> str:
+    m = re.match(r'^([a-zA-Z]+)', cluster_name)
+    return m.group(1).lower() if m else ""
+
+
+@router.post("/alert")
+async def cluster_alert(body: AlertRequest, session: dict = Depends(get_session)):
+    """
+    Health-alert notification: creates notifications for the cluster owner
+    and all users the cluster is shared with. Deduplicates within 5 minutes
+    so polling at 8s doesn't spam the DB.
+    """
+    cluster_name = body.cluster_name
+
+    with Session(engine) as db:
+        # Dedup: skip if same message was sent for this cluster in the last 5 min
+        recent = db.exec(
+            select(Notification).where(
+                Notification.cluster_name == cluster_name,
+                Notification.message == body.message,
+                Notification.created_at >= datetime.utcnow() - timedelta(minutes=5),
+            )
+        ).first()
+        if recent:
+            return {"ok": True, "duplicate": True}
+
+        # Build recipient set: owner + shared users
+        owner = _owner_from_cluster(cluster_name)
+        recipients: set[str] = set()
+        if owner:
+            recipients.add(owner)
+
+        shares = db.exec(
+            select(ClusterShare).where(ClusterShare.cluster_name == cluster_name)
+        ).all()
+        for s in shares:
+            if s.shared_with == "*":
+                for u in db.exec(select(User)).all():
+                    recipients.add(u.username)
+            else:
+                recipients.add(s.shared_with)
+
+        # Create notification rows
+        created: list[Notification] = []
+        for recipient in recipients:
+            n = Notification(
+                username=recipient,
+                from_user="system",
+                cluster_name=cluster_name,
+                message=body.message,
+            )
+            db.add(n)
+            created.append(n)
+        db.commit()
+        for n in created:
+            db.refresh(n)
+
+        # Fan out via SSE
+        for n in created:
+            notif_data = {
+                "type": "notification",
+                "id": n.id,
+                "from_user": "system",
+                "cluster_name": cluster_name,
+                "message": body.message,
+                "read": False,
+                "created_at": n.created_at.isoformat() + "Z",
+            }
+            asyncio.create_task(push_notification(n.username, notif_data))
+
+    return {"ok": True, "recipients": list(recipients)}

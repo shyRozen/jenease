@@ -64,7 +64,7 @@ export default function NotificationBell() {
           // Show toast popup
           const toast: Toast = { id: data.id, message: data.message, cluster_name: data.cluster_name }
           setToasts(prev => [...prev, toast])
-          setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toast.id)), 5000)
+          setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toast.id)), 8000)
         }
       } catch {}
     }

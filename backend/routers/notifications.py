@@ -94,6 +94,18 @@ def mark_read(notif_id: int, session: dict = Depends(get_session)):
     return {"ok": True}
 
 
+@router.post("/{notif_id}/unread")
+def mark_unread(notif_id: int, session: dict = Depends(get_session)):
+    username = session["username"]
+    with Session(engine) as db:
+        n = db.get(Notification, notif_id)
+        if n and n.username == username:
+            n.read = False
+            db.add(n)
+            db.commit()
+    return {"ok": True}
+
+
 @router.post("/read-all")
 def mark_all_read(session: dict = Depends(get_session)):
     username = session["username"]

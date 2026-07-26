@@ -86,6 +86,12 @@ export default function NotificationBell() {
     setUnread(u => Math.max(0, u - 1))
   }
 
+  async function markUnread(id: number) {
+    await api.post(`/notifications/${id}/unread`).catch(() => {})
+    setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: false } : n))
+    setUnread(u => u + 1)
+  }
+
   async function markAllRead() {
     await api.post('/notifications/read-all').catch(() => {})
     setNotifications(prev => prev.map(n => ({ ...n, read: true })))
@@ -156,12 +162,18 @@ export default function NotificationBell() {
                     <p className="text-[11px] font-mono text-text-primary leading-snug">{n.message}</p>
                     <p className="text-[9px] font-mono text-text-muted mt-0.5">{timeAgo(n.created_at)}</p>
                   </div>
-                  {!n.read && (
+                  {!n.read ? (
                     <button
                       onClick={e => { e.stopPropagation(); markRead(n.id) }}
                       className="shrink-0 text-[9px] font-mono text-text-muted hover:text-accent-cyan transition-colors opacity-0 group-hover:opacity-100 mt-0.5"
                       title="Mark as read"
                     >✓</button>
+                  ) : (
+                    <button
+                      onClick={e => { e.stopPropagation(); markUnread(n.id) }}
+                      className="shrink-0 text-[9px] font-mono text-text-muted hover:text-accent-amber transition-colors opacity-0 group-hover:opacity-100 mt-0.5"
+                      title="Mark as unread"
+                    >○</button>
                   )}
                 </div>
               ))}

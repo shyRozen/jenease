@@ -137,8 +137,9 @@ async def active_clusters(session: dict = Depends(get_session)):
     username = session["username"]
 
     # Fetch deploy + destroy builds concurrently
+    # 500 build window covers ~2-3 months of typical deploy volume
     deploy_builds, destroy_builds = await asyncio.gather(
-        jenkins.get_job_builds(DEPLOY_JOB, limit=200),
+        jenkins.get_job_builds(DEPLOY_JOB, limit=500),
         jenkins.get_job_builds(DESTROY_JOB, limit=500),
     )
 

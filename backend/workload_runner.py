@@ -54,7 +54,7 @@ _K8S_LOAD_LOCK = threading.Lock()
 
 SYNC_POLL_CMD = (
     "echo '[jenease] Waiting for sync signal…' && "
-    "until [ -f /tmp/jenease-start ]; do sleep 1; done && "
+    "until [ \"$(cat /jenease-sync/start 2>/dev/null)\" = 'true' ]; do sleep 1; done && "
     "echo '[jenease] ✓ All pods ready — starting IO' && "
 )
 
@@ -680,9 +680,11 @@ async def stream_pod_logs(
             core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
 
             # Wait up to 10 min for pod to be Running (image pulls can be slow)
+            not_found_count = 0
             for _ in range(300):
                 try:
                     pod = core.read_namespaced_pod(name=pod_name, namespace=namespace)
+                    not_found_count = 0
                     phase = pod.status.phase or ""
 
                     # Check if container is actually running (not just pod phase)
@@ -710,7 +712,12 @@ async def stream_pod_logs(
                         msg = f"[jenease] Pod pending — {detail}"
                         loop.call_soon_threadsafe(queue.put_nowait, msg)
                 except Exception:
-                    pass
+                    not_found_count += 1
+                    # Report every 10s when pod doesn't exist yet (backend still creating it)
+                    if not_found_count % 5 == 1:
+                        loop.call_soon_threadsafe(
+                            queue.put_nowait, "[jenease] Waiting for backend to create pod…"
+                        )
                 time.sleep(2)
 
             # Check final pod phase to decide how to stream
@@ -1127,53 +1134,39 @@ def _sync_setup_sync_configmap(core, rbac, client, namespace: str):
 
 
 def _sync_signal_start(kubeconfig_url: str, pods: list):
-    """Touch /tmp/jenease-start in each pod at its offset after all-ready.
+    """Patch jenease-sync ConfigMap in each namespace to trigger IO start.
 
+    Uses HTTP PATCH (not WebSocket exec) so it works reliably through squid proxies.
     pods: list of (namespace, pod_name, offset_sec).
-    Groups by offset_sec and spawns one daemon thread per unique offset.
-    Offset=0 pods get the signal immediately; T>0 pods wait their delay."""
-    from kubernetes.stream import stream as k8s_stream
+    Groups by offset_sec; offset>0 groups wait their delay before patching."""
     from collections import defaultdict
     import time as _time
 
     by_offset: dict = defaultdict(list)
     for ns, pn, offset in pods:
-        by_offset[float(offset or 0)].append((ns, pn))
+        by_offset[float(offset or 0)].append(ns)
 
-    def _fire(delay_secs: float, ns_pod_pairs: list):
+    def _fire(delay_secs: float, namespaces: list):
         try:
-            _fire_inner(delay_secs, ns_pod_pairs)
+            print(f"[SYNC-SIGNAL] _fire started for {len(namespaces)} namespaces", flush=True)
+            if delay_secs > 0:
+                _time.sleep(delay_secs)
+            core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
+            for ns in namespaces:
+                try:
+                    core.patch_namespaced_config_map(
+                        "jenease-sync", ns,
+                        {"data": {"start": "true"}},
+                    )
+                    print(f"[SYNC-SIGNAL] CM patched in {ns} ✓", flush=True)
+                except Exception as _e:
+                    print(f"[SYNC-SIGNAL] CM patch failed in {ns}: {_e}", flush=True)
+            api_client.close()
         except Exception as _top:
             print(f"[SYNC-SIGNAL] _fire CRASHED: {type(_top).__name__}: {_top}", flush=True)
-            import traceback; traceback.print_exc()
 
-    def _fire_inner(delay_secs: float, ns_pod_pairs: list):
-        print(f"[SYNC-SIGNAL] _fire started for {len(ns_pod_pairs)} pods", flush=True)
-        if delay_secs > 0:
-            _time.sleep(delay_secs)
-        core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
-        print(f"[SYNC-SIGNAL] k8s client ready", flush=True)
-        for ns, pn in ns_pod_pairs:
-            success = False
-            for attempt in range(3):
-                try:
-                    k8s_stream(
-                        core.connect_get_namespaced_pod_exec,
-                        pn, ns,
-                        command=["touch", "/tmp/jenease-start"],
-                        stderr=True, stdin=False, stdout=True, tty=False,
-                    )
-                    success = True
-                    break
-                except Exception as _e:
-                    print(f"[SYNC-SIGNAL] touch {pn} attempt {attempt+1}/3 failed: {_e}", flush=True)
-                    if attempt < 2:
-                        _time.sleep(2)
-            print(f"[SYNC-SIGNAL] {pn} → {'✓' if success else '✗ FAILED'}", flush=True)
-        api_client.close()
-
-    for offset, pairs in sorted(by_offset.items()):
-        t = threading.Thread(target=_fire, args=(offset, list(pairs)), daemon=True)
+    for offset, namespaces in sorted(by_offset.items()):
+        t = threading.Thread(target=_fire, args=(offset, list(namespaces)), daemon=True)
         t.start()
 
 
@@ -1406,7 +1399,14 @@ def _sync_create_resources_only(
                         client.V1EnvVar(name="OBJ_SIZE_MB", value=str(obj_size_mb)),
                         client.V1EnvVar(name="WORKERS",     value=str(workers)),
                     ],
+                    volume_mounts=[
+                        client.V1VolumeMount(name="jenease-sync-vol", mount_path="/jenease-sync"),
+                    ],
                 )],
+                volumes=[
+                    client.V1Volume(name="jenease-sync-vol",
+                        config_map=client.V1ConfigMapVolumeSource(name="jenease-sync")),
+                ],
             ),
         )
     else:
@@ -1452,14 +1452,31 @@ def _sync_create_resources_only(
                     command=["/bin/bash", "-c", SYNC_POLL_CMD + cmd],
                     env=[client.V1EnvVar(name="SIZE_GB", value=str(size_gb))],
                     security_context=client.V1SecurityContext(run_as_user=0, allow_privilege_escalation=False),
-                    volume_mounts=[client.V1VolumeMount(name="data", mount_path="/data")],
+                    volume_mounts=[
+                        client.V1VolumeMount(name="data", mount_path="/data"),
+                        client.V1VolumeMount(name="jenease-sync-vol", mount_path="/jenease-sync"),
+                    ],
                 )],
-                volumes=[client.V1Volume(name="data",
-                    persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(claim_name=pvc_name))],
+                volumes=[
+                    client.V1Volume(name="data",
+                        persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(claim_name=pvc_name)),
+                    client.V1Volume(name="jenease-sync-vol",
+                        config_map=client.V1ConfigMapVolumeSource(name="jenease-sync")),
+                ],
             ),
         )
 
-    core.create_namespaced_pod(namespace, pod)
+    # Retry on 403: SCC RBAC binding may not have propagated yet on strict clusters.
+    for _attempt in range(4):
+        try:
+            core.create_namespaced_pod(namespace, pod)
+            break
+        except Exception as _e:
+            if _attempt < 3 and "403" in str(_e):
+                print(f"[sync-create] 403 on pod creation (attempt {_attempt+1}/4, SCC propagation), retrying in 3s", flush=True)
+                time.sleep(3)
+            else:
+                raise
     api_client.close()
 
 

@@ -557,7 +557,16 @@ export default function WorkloadPanel({
     refetchInterval: 10_000,
   })
 
-  const activeWorkloads = workloads.filter(w => w.phase === 'Running' || w.phase === 'Pending')
+  const activeWorkloads = workloads.filter(w => {
+    if (w.phase === 'Running' || w.phase === 'Pending') return true
+    // Keep Unknown-phase workloads alive for 15 min — prevents the SSE from closing
+    // prematurely when _PENDING_PARAMS is popped but the pod hasn't appeared yet.
+    if (w.phase === 'Unknown') {
+      const ageMs = Date.now() - new Date(w.created_at).getTime()
+      return ageMs < 15 * 60 * 1000
+    }
+    return false
+  })
   // Reset clearAll once all workloads have been removed
   useEffect(() => { if (clearAll && workloads.length === 0) setClearAll(false) }, [clearAll, workloads.length])
 

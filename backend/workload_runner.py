@@ -1332,9 +1332,26 @@ def _sync_create_resources_only(
     core, custom, _, api_client = _sync_load_k8s(kubeconfig_url)
     rbac = client.RbacAuthorizationV1Api(api_client)
 
-    # Namespace
+    # Namespace — PSA labels allow root pods on OpenShift 4.12+ clusters
     try:
-        core.create_namespace(client.V1Namespace(metadata=client.V1ObjectMeta(name=namespace)))
+        core.create_namespace(client.V1Namespace(metadata=client.V1ObjectMeta(
+            name=namespace,
+            labels={
+                "pod-security.kubernetes.io/enforce": "privileged",
+                "pod-security.kubernetes.io/warn":    "privileged",
+                "pod-security.kubernetes.io/audit":   "privileged",
+            },
+        )))
+    except Exception:
+        pass
+
+    # Patch labels onto existing namespace too (handles namespace-already-exists case)
+    try:
+        core.patch_namespace(namespace, {"metadata": {"labels": {
+            "pod-security.kubernetes.io/enforce": "privileged",
+            "pod-security.kubernetes.io/warn":    "privileged",
+            "pod-security.kubernetes.io/audit":   "privileged",
+        }}})
     except Exception:
         pass
 

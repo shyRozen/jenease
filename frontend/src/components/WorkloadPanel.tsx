@@ -491,7 +491,10 @@ export default function WorkloadPanel({
       holdlastRatesRef.current[id] = rateMb
       updateHoldlast(id, rateMb)
     }
-    if (rateMb == null) delete holdlastRatesRef.current[id]
+    if (rateMb == null) {
+      delete holdlastRatesRef.current[id]
+      updateHoldlast(id, null)
+    }
     setRates(prev => {
       const next = { ...prev }
       if (rateMb == null) delete next[id]

@@ -509,9 +509,13 @@ export default function WorkloadPanel({
     const id = setInterval(() => {
       const byType: Record<string, number> = { rbd: 0, cephfs: 0, noobaa: 0 }
       for (const w of workloadsRef.current) {
-        // Per-workload holdlast: if THIS workload has no live rate yet (just reconnected),
-        // use its individual holdlast. Prevents one slow workload from zeroing its type line
-        // while other workloads of different types are reporting correctly.
+        // Only include workloads that are still active (Running / Pending / recently Unknown).
+        // Succeeded/Failed workloads are done — their holdlast must not bleed into the chart
+        // when a new workload is launching alongside them (uncleaned DB record).
+        const wAgeMs = Date.now() - new Date(w.created_at).getTime()
+        const wActive = w.phase === 'Running' || w.phase === 'Pending' ||
+          (w.phase === 'Unknown' && wAgeMs < 10 * 60 * 1000)
+        if (!wActive) continue
         const live = ratesRef.current[w.id] ?? 0
         const r = live > 0 ? live : (holdlastRatesRef.current[w.id] ?? 0)
         byType[w.workload_type] = (byType[w.workload_type] ?? 0) + r
@@ -527,7 +531,13 @@ export default function WorkloadPanel({
       const rbd    = workloadsRef.current.length > 0 ? byType.rbd    : fallback.rbd
       const cephfs = workloadsRef.current.length > 0 ? byType.cephfs : fallback.cephfs
       const noobaa = workloadsRef.current.length > 0 ? byType.noobaa : fallback.noobaa
-      const total  = (rbd + cephfs + noobaa) || (cephAggRef.current.r + cephAggRef.current.w)
+      // Use cephAgg only when there are no workloads at all (idle monitoring).
+      // When workloads exist but fio hasn't started yet, show 0 — not background cephAgg
+      // which looks like the previous session's value and confuses the start-of-run baseline.
+      const fioSum = rbd + cephfs + noobaa
+      const total  = fioSum > 0
+        ? fioSum
+        : (workloadsRef.current.length === 0 ? (cephAggRef.current.r + cephAggRef.current.w) : 0)
       const now = Date.now()
       const pt = { ts: now, total, rbd, cephfs, noobaa, ceph_r: cephAggRef.current.r, ceph_w: cephAggRef.current.w }
       if (showList) pushThroughputPoint(clusterName, pt)

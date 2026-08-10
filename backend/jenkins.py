@@ -65,20 +65,36 @@ class JenkinsClient:
         fields = "number,result,building,timestamp,description,duration"
         if include_causes:
             fields += ",actions[causes[upstreamProject,upstreamBuild,upstreamUrl]]"
-        params = {"tree": f"builds[{fields}]{{0,{limit}}}"}
-        async with self._client() as c:
-            r = await c.get(url, params=params)
-        if r.status_code == 200:
-            return r.json().get("builds", [])
-        # SSO-only Jenkins rejects Basic Auth but allows anonymous reads (same as validate())
-        if r.status_code in (401, 403):
-            async with httpx.AsyncClient(**_CLIENT_DEFAULTS) as anon:
-                r2 = await anon.get(url, params=params)
-            if r2.status_code == 200:
-                return r2.json().get("builds", [])
-        self._check_auth(r)
-        r.raise_for_status()
-        return []
+
+        async def _fetch(prop: str) -> tuple[bool, list[dict]]:
+            """Returns (property_exists, builds_list)."""
+            params = {"tree": f"{prop}[{fields}]{{{0},{limit}}}"}
+            async with self._client() as c:
+                r = await c.get(url, params=params)
+            if r.status_code == 200:
+                data = r.json()
+                # Key present → property is supported (even if list is empty)
+                if prop in data:
+                    return True, data[prop]
+                return False, []
+            if r.status_code in (401, 403):
+                async with httpx.AsyncClient(**_CLIENT_DEFAULTS) as anon:
+                    r2 = await anon.get(url, params=params)
+                if r2.status_code == 200:
+                    data = r2.json()
+                    if prop in data:
+                        return True, data[prop]
+                    return False, []
+            self._check_auth(r)
+            r.raise_for_status()
+            return False, []
+
+        # allBuilds bypasses Jenkins' hard 100-build cap on the 'builds' property.
+        # If the Jenkins instance supports it, use it; otherwise fall back to builds.
+        supported, builds = await _fetch("allBuilds")
+        if not supported:
+            _, builds = await _fetch("builds")
+        return builds
 
     async def get_build_params(self, job: str, build_num: int) -> dict:
         build = await self.get_build(job, build_num)

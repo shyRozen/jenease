@@ -136,10 +136,12 @@ async def active_clusters(session: dict = Depends(get_session)):
     jenkins = _make_client(session)
     username = session["username"]
 
-    # Fetch deploy + destroy builds concurrently
-    # 500 build window covers ~2-3 months of typical deploy volume
+    # Fetch deploy + destroy builds concurrently.
+    # allBuilds (used inside get_job_builds) bypasses Jenkins' 100-build hard cap on
+    # the 'builds' property — we get the full requested window.
+    # 1000 deploy builds covers ~3-4 weeks of typical team deploy volume.
     deploy_builds, destroy_builds = await asyncio.gather(
-        jenkins.get_job_builds(DEPLOY_JOB, limit=500),
+        jenkins.get_job_builds(DEPLOY_JOB, limit=1000),
         jenkins.get_job_builds(DESTROY_JOB, limit=500),
     )
 
@@ -359,7 +361,7 @@ async def all_clusters(session: dict = Depends(get_session)):
     jenkins = _make_client(session)
 
     deploy_builds, prod_builds, fdf_builds, destroy_builds, locker = await asyncio.gather(
-        jenkins.get_job_builds(DEPLOY_JOB, limit=200),
+        jenkins.get_job_builds(DEPLOY_JOB, limit=500),
         jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=200, include_causes=True),
         jenkins.get_job_builds(FDF_DEPLOY_JOB, limit=100, include_causes=True),
         jenkins.get_job_builds(DESTROY_JOB, limit=500),

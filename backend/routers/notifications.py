@@ -55,10 +55,11 @@ async def notification_stream(session: dict = Depends(get_session)):
                 ).all())
             yield {"data": json.dumps({"type": "init", "unread": unread})}
             while True:
-                item = await asyncio.wait_for(queue.get(), timeout=30)
-                yield {"data": json.dumps(item)}
-        except asyncio.TimeoutError:
-            yield {"data": json.dumps({"type": "ping"})}
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=30)
+                    yield {"data": json.dumps(item)}
+                except asyncio.TimeoutError:
+                    yield {"data": json.dumps({"type": "ping"})}
         except asyncio.CancelledError:
             pass
         finally:

@@ -31,6 +31,7 @@ _KUBECONFIG_CACHE: dict[str, tuple[str, float]] = {}  # cluster_name -> (url, ti
 _KUBECONFIG_TTL = 3600  # 1 hour
 # Creation params stored per workload_id so the log stream can run the full creation
 _PENDING_PARAMS: dict[int, dict] = {}
+_BACKGROUND_TASKS: set = set()
 
 
 def _make_jenkins(session: dict) -> JenkinsClient:
@@ -272,7 +273,9 @@ async def sync_launch(
     # then fires the signal. Independent of SSE connections — fixes the browser
     # HTTP/1.1 limit (~6 connections/origin) that left queued workloads uncreated.
     import asyncio as _asyncio
-    _asyncio.create_task(_backend_sync_orchestrate(kubeconfig_url, wl_specs, workload_ids, pods, _PENDING_PARAMS))
+    task = _asyncio.create_task(_backend_sync_orchestrate(kubeconfig_url, wl_specs, workload_ids, pods, _PENDING_PARAMS))
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
 
     # Record all workload events in the session (all at offset 0 — sync fires simultaneously)
     if body.session_id:

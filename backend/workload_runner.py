@@ -54,13 +54,7 @@ _K8S_LOAD_LOCK = threading.Lock()
 
 SYNC_POLL_CMD = (
     "echo '[jenease] Waiting for sync signal…' && "
-    "T=$(cat /run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null); "
-    "N=$(cat /run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null); "
-    "until wget -qO- --no-check-certificate --timeout=5 "
-    '--header "Authorization: Bearer $T" '
-    '"https://kubernetes.default.svc/api/v1/namespaces/$N/configmaps/jenease-sync" '
-    "2>/dev/null | grep -q '\"true\"' "
-    "|| [ \"$(cat /jenease-sync/start 2>/dev/null)\" = 'true' ]; "
+    "until [ -f /tmp/jenease-start ] || [ \"$(cat /jenease-sync/start 2>/dev/null)\" = 'true' ]; "
     "do sleep 1; done && "
     "echo '[jenease] ✓ All pods ready — starting IO' && "
 )
@@ -1141,39 +1135,80 @@ def _sync_setup_sync_configmap(core, rbac, client, namespace: str):
 
 
 def _sync_signal_start(kubeconfig_url: str, pods: list):
-    """Patch jenease-sync ConfigMap in each namespace to trigger IO start.
+    """Signal each pod to start IO.
 
-    Uses HTTP PATCH (not WebSocket exec) so it works reliably through squid proxies.
+    Primary: exec 'touch /tmp/jenease-start' directly (no proxy — squid doesn't
+    support WebSocket CONNECT). Fallback: patch the jenease-sync ConfigMap (HTTP
+    PATCH, works through proxy) — pod picks it up via mounted volume.
+
     pods: list of (namespace, pod_name, offset_sec).
-    Groups by offset_sec; offset>0 groups wait their delay before patching."""
+    Groups by offset_sec; offset>0 groups wait their delay."""
     from collections import defaultdict
+    from kubernetes.stream import stream as k8s_stream
+    from kubernetes import client as _k8s_client
     import time as _time
 
     by_offset: dict = defaultdict(list)
     for ns, pn, offset in pods:
-        by_offset[float(offset or 0)].append(ns)
+        by_offset[float(offset or 0)].append((ns, pn))
 
-    def _fire(delay_secs: float, namespaces: list):
+    def _fire(delay_secs: float, ns_pod_pairs: list):
         try:
-            print(f"[SYNC-SIGNAL] _fire started for {len(namespaces)} namespaces", flush=True)
+            print(f"[SYNC-SIGNAL] _fire started for {len(ns_pod_pairs)} pods", flush=True)
             if delay_secs > 0:
                 _time.sleep(delay_secs)
-            core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
-            for ns in namespaces:
-                try:
-                    core.patch_namespaced_config_map(
-                        "jenease-sync", ns,
-                        {"data": {"start": "true"}},
-                    )
-                    print(f"[SYNC-SIGNAL] CM patched in {ns} ✓", flush=True)
-                except Exception as _e:
-                    print(f"[SYNC-SIGNAL] CM patch failed in {ns}: {_e}", flush=True)
+
+            core, _, cfg, api_client = _sync_load_k8s(kubeconfig_url)
+
+            # Build a no-proxy api_client for WebSocket exec.
+            # The squid proxy doesn't support WebSocket CONNECT, but the k8s API
+            # server is directly reachable from the backend host.
+            cfg_direct = _k8s_client.Configuration()
+            cfg_direct.host            = cfg.host
+            cfg_direct.verify_ssl      = cfg.verify_ssl
+            cfg_direct.ssl_ca_cert     = cfg.ssl_ca_cert
+            cfg_direct.cert_file       = cfg.cert_file
+            cfg_direct.key_file        = cfg.key_file
+            cfg_direct.api_key         = dict(cfg.api_key)
+            cfg_direct.api_key_prefix  = dict(cfg.api_key_prefix)
+            api_client_direct = _k8s_client.ApiClient(cfg_direct)
+            core_direct = _k8s_client.CoreV1Api(api_client_direct)
+
+            for ns, pn in ns_pod_pairs:
+                exec_ok = False
+                for attempt in range(3):
+                    try:
+                        k8s_stream(
+                            core_direct.connect_get_namespaced_pod_exec,
+                            pn, ns,
+                            command=["touch", "/tmp/jenease-start"],
+                            stderr=True, stdin=False, stdout=True, tty=False,
+                        )
+                        exec_ok = True
+                        print(f"[SYNC-SIGNAL] exec touch {pn} ✓", flush=True)
+                        break
+                    except Exception as _e:
+                        print(f"[SYNC-SIGNAL] exec {pn} attempt {attempt+1}/3 failed: {_e}", flush=True)
+                        if attempt < 2:
+                            _time.sleep(1)
+
+                if not exec_ok:
+                    # Fallback: CM patch (eventual, via mounted volume propagation)
+                    try:
+                        core.patch_namespaced_config_map(
+                            "jenease-sync", ns, {"data": {"start": "true"}}
+                        )
+                        print(f"[SYNC-SIGNAL] CM patch fallback in {ns} ✓", flush=True)
+                    except Exception as _e:
+                        print(f"[SYNC-SIGNAL] CM patch fallback failed in {ns}: {_e}", flush=True)
+
+            api_client_direct.close()
             api_client.close()
         except Exception as _top:
             print(f"[SYNC-SIGNAL] _fire CRASHED: {type(_top).__name__}: {_top}", flush=True)
 
-    for offset, namespaces in sorted(by_offset.items()):
-        t = threading.Thread(target=_fire, args=(offset, list(namespaces)), daemon=True)
+    for offset, pairs in sorted(by_offset.items()):
+        t = threading.Thread(target=_fire, args=(offset, list(pairs)), daemon=True)
         t.start()
 
 

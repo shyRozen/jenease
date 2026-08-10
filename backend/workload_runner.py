@@ -54,7 +54,14 @@ _K8S_LOAD_LOCK = threading.Lock()
 
 SYNC_POLL_CMD = (
     "echo '[jenease] Waiting for sync signal…' && "
-    "until [ \"$(cat /jenease-sync/start 2>/dev/null)\" = 'true' ]; do sleep 1; done && "
+    "T=$(cat /run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null); "
+    "N=$(cat /run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null); "
+    "until wget -qO- --no-check-certificate --timeout=5 "
+    '--header "Authorization: Bearer $T" '
+    '"https://kubernetes.default.svc/api/v1/namespaces/$N/configmaps/jenease-sync" '
+    "2>/dev/null | grep -q '\"true\"' "
+    "|| [ \"$(cat /jenease-sync/start 2>/dev/null)\" = 'true' ]; "
+    "do sleep 1; done && "
     "echo '[jenease] ✓ All pods ready — starting IO' && "
 )
 

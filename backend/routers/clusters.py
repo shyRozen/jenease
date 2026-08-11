@@ -244,11 +244,8 @@ def clear_user_cache(username: str) -> None:
 
 async def _scan_active_clusters(jenkins: JenkinsClient, username: str) -> list[dict]:
     # Fetch deploy + destroy builds concurrently.
-    # allBuilds (used inside get_job_builds) bypasses Jenkins' 100-build hard cap on
-    # the 'builds' property — we get the full requested window.
-    # 1000 deploy builds covers ~3-4 weeks of typical team deploy volume.
     deploy_builds, destroy_builds = await asyncio.gather(
-        jenkins.get_job_builds(DEPLOY_JOB, limit=1000),
+        jenkins.get_job_builds(DEPLOY_JOB, limit=500),
         jenkins.get_job_builds(DESTROY_JOB, limit=500),
     )
 

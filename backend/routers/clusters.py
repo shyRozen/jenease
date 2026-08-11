@@ -210,7 +210,9 @@ async def active_clusters(session: dict = Depends(get_session)):
     if now - entry.get("fetched_at", 0) > _CACHE_TTL and username not in _fetching:
         asyncio.create_task(_do_refresh_cache(username, token))
 
-    return entry.get("clusters", [])
+    result = entry.get("clusters", [])
+    print(f"[cache] /active → {username}: {len(result)} clusters, age={int(now - entry.get('fetched_at',0))}s", flush=True)
+    return result
 
 
 async def _do_refresh_cache(username: str, token: str) -> None:

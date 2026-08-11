@@ -138,6 +138,7 @@ print('[jenease] Workload complete.', flush=True)
 _NOOBAA_SCRIPT = """
 import boto3, os, time, threading
 import urllib3; urllib3.disable_warnings()
+from botocore.config import Config
 
 endpoint  = os.environ["S3_ENDPOINT"]
 key_id    = os.environ["ACCESS_KEY"]
@@ -153,7 +154,8 @@ chunk        = b"x" * OBJ_SIZE
 def make_s3():
     return boto3.client("s3", endpoint_url=endpoint,
                         aws_access_key_id=key_id, aws_secret_access_key=secret,
-                        verify=False)
+                        verify=False,
+                        config=Config(proxies={}))
 
 s3 = make_s3()
 try:

@@ -1525,10 +1525,10 @@ def _sync_create_resources_only(
             ),
         ))
         fio_rw     = FIO_RW.get((mode, pattern), "write")
-        # Leave 1GB headroom so fio doesn't hit ENOSPC due to filesystem overhead.
-        # A 10GB PVC only has ~9.5GB usable; without this margin the layout phase
-        # runs for minutes before failing with ENOSPC.
-        per_job_gb = max(1, (size_gb - 1) // num_jobs)
+        # Use 90% of requested size to avoid ENOSPC: filesystem overhead on Ceph RBD
+        # (XFS journal + metadata) consumes ~2-5% of PVC capacity, so a flat 1GB
+        # margin was enough for 10GB but not for 50GB+. 90% leaves ~5GB on a 50GB PVC.
+        per_job_gb = max(1, (size_gb * 9 // 10) // num_jobs)
         duration_desc = f"{duration_sec}s" if duration_sec > 0 else f"{per_job_gb}GB"
         time_flags  = f"--time_based --runtime={duration_sec}" if duration_sec > 0 else ""
         direct_flag = "--direct=1" if direct else ""

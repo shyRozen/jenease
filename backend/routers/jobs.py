@@ -9,8 +9,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from auth import get_session
+from config import settings
 from jenkins import JenkinsClient
 from job_parser import parse_job
+from routers.clusters import inject_building_cluster
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -278,4 +280,17 @@ async def trigger_job(body: TriggerRequest, session: dict = Depends(get_session)
         raise HTTPException(502, f"Jenkins trigger failed: {e}")
 
     print(f"[TRIGGER OK] queue_item={queue_item} cluster={body.cluster_name}", flush=True)
+
+    ocp_version      = params.get("OCP_VERSION", "")
+    ocs_version      = params.get("OCS_VERSION", "")
+    credentials_conf = params.get("CREDENTIALS_CONF", "")
+    platform_conf    = params.get("FULL_PLATFORM_CONF") or params.get("CLUSTER_CONF", "")
+    osd_size         = params.get("OSD_SIZE", "")
+    build_url        = f"{settings.jenkins_url}/job/{target_job}/"
+
+    inject_building_cluster(
+        username, body.cluster_name, build_url,
+        ocp_version, ocs_version, credentials_conf, platform_conf, osd_size,
+    )
+
     return {"queue_item": queue_item, "job": target_job, "cluster_name": body.cluster_name}

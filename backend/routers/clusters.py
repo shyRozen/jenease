@@ -1,7 +1,7 @@
 import asyncio
 import html as _html_mod
 import re
-import time
+import time as _time
 from datetime import datetime
 from typing import Optional
 
@@ -16,6 +16,12 @@ from jenkins import JenkinsClient
 from config import settings
 
 router = APIRouter(prefix="/api/clusters", tags=["clusters"])
+
+# ── My Clusters server-side cache ────────────────────────────────────────────
+# Keyed by username. Shared clusters (from DB) are refreshed inline each call.
+_CACHE_TTL = 300  # 5 minutes
+_clusters_cache: dict[str, dict] = {}   # {username: {clusters, fetched_at, token}}
+_fetching: set[str] = set()             # usernames currently being fetched
 
 DEPLOY_JOB      = "qe-deploy-ocs-cluster"
 PROD_DEPLOY_JOB = "qe-deploy-ocs-cluster-prod"
@@ -133,9 +139,106 @@ async def _get_build_params_safe(jenkins: JenkinsClient, job: str, build_num: in
 
 @router.get("/active")
 async def active_clusters(session: dict = Depends(get_session)):
-    jenkins = _make_client(session)
     username = session["username"]
+    token    = session["token"]
+    entry = _clusters_cache.get(username)
+    now = _time.time()
 
+    if entry is None:
+        # Cold start — must block once so the user sees data on first load
+        if username not in _fetching:
+            await _do_refresh_cache(username, token)
+        else:
+            # Another concurrent request is already fetching; wait for it
+            while username in _fetching:
+                await asyncio.sleep(0.1)
+        entry = _clusters_cache.get(username, {})
+        return entry.get("clusters", [])
+
+    # Keep token current (re-auth)
+    entry["token"] = token
+
+    # Trigger background refresh when stale
+    if now - entry.get("fetched_at", 0) > _CACHE_TTL and username not in _fetching:
+        asyncio.create_task(_do_refresh_cache(username, token))
+
+    return entry.get("clusters", [])
+
+
+async def _do_refresh_cache(username: str, token: str) -> None:
+    """Fetch active clusters from Jenkins and update the cache."""
+    if username in _fetching:
+        return
+    _fetching.add(username)
+    try:
+        jenkins = JenkinsClient(username, token)
+        clusters = await _scan_active_clusters(jenkins, username)
+        _clusters_cache[username] = {
+            "clusters": clusters,
+            "fetched_at": _time.time(),
+            "token": token,
+        }
+    except Exception:
+        # Keep stale data; advance fetched_at so we retry after TTL not immediately
+        if username in _clusters_cache:
+            _clusters_cache[username]["fetched_at"] = _time.time()
+    finally:
+        _fetching.discard(username)
+
+
+def inject_building_cluster(
+    username: str,
+    cluster_name: str,
+    build_url: str,
+    ocp_version: str,
+    ocs_version: str,
+    credentials_conf: str,
+    platform_conf: str,
+    osd_size: str,
+) -> None:
+    """Inject a just-triggered building cluster into the user's cache immediately."""
+    from cluster_health import _parse_topology as _pt
+    masters, workers = _pt(platform_conf)
+    provisional = {
+        "cluster_name": cluster_name,
+        "build_num": 0,
+        "build_url": build_url,
+        "building": True,
+        "result": None,
+        "timestamp": int(_time.time() * 1000),
+        "duration": None,
+        "kubeconfig_url": None,
+        "console_url": None,
+        "logs_url": None,
+        "kubeadmin_password": None,
+        "agent_ip": None,
+        "ocp_version": ocp_version,
+        "ocs_version": ocs_version,
+        "credentials_conf": credentials_conf,
+        "platform_conf": platform_conf,
+        "osd_size": osd_size,
+        "topology": {"masters": masters, "workers": workers},
+    }
+    entry = _clusters_cache.get(username)
+    if entry is None:
+        # No cache yet; create a minimal one so the cluster appears immediately
+        _clusters_cache[username] = {
+            "clusters": [provisional],
+            "fetched_at": 0,  # 0 forces a background refresh on next request
+            "token": "",
+        }
+        return
+    # Remove stale entry for same cluster name then prepend
+    clusters = [c for c in entry.get("clusters", []) if c.get("cluster_name") != cluster_name]
+    entry["clusters"] = [provisional, *clusters]
+
+
+def clear_user_cache(username: str) -> None:
+    _clusters_cache.pop(username, None)
+    _fetching.discard(username)
+
+
+async def _scan_active_clusters(jenkins: JenkinsClient, username: str) -> list[dict]:
     # Fetch deploy + destroy builds concurrently.
     # allBuilds (used inside get_job_builds) bypasses Jenkins' 100-build hard cap on
     # the 'builds' property — we get the full requested window.

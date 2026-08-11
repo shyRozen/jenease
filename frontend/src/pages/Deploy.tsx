@@ -554,6 +554,7 @@ function JobListRow({ job, onModify }: { job: DeployJob; onModify: (name: string
   const [ocsVal, setOcsVal] = useState(String(ocs?.default ?? ''))
   const [clusterName, setClusterName] = useState('')
 
+  const navigate = useNavigate()
   const flavor = jobFlavor(job)
   const { data: suggestion } = useQuery({
     queryKey: ['suggest-name', flavor],
@@ -581,7 +582,7 @@ function JobListRow({ job, onModify }: { job: DeployJob; onModify: (name: string
         cluster_name: clusterName,
       })
       setToast('✓')
-      setTimeout(() => setToast(''), 3000)
+      setTimeout(() => navigate(`/clusters?highlight=${encodeURIComponent(clusterName)}`), 1200)
     } catch (e: any) {
       setToast(`✕ ${e.message ?? 'failed'}`)
     } finally {

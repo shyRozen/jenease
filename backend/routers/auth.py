@@ -73,6 +73,12 @@ async def me(session: dict = Depends(get_session)):
 
 
 @router.post("/logout")
-async def logout(response: Response):
+async def logout(request: Request, response: Response):
+    try:
+        session = get_session(request)
+        from routers.clusters import clear_user_cache
+        clear_user_cache(session["username"])
+    except Exception:
+        pass
     response.delete_cookie(COOKIE_NAME)
     return {"ok": True}

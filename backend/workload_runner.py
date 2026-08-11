@@ -1525,7 +1525,10 @@ def _sync_create_resources_only(
             ),
         ))
         fio_rw     = FIO_RW.get((mode, pattern), "write")
-        per_job_gb = max(1, size_gb // num_jobs)
+        # Leave 1GB headroom so fio doesn't hit ENOSPC due to filesystem overhead.
+        # A 10GB PVC only has ~9.5GB usable; without this margin the layout phase
+        # runs for minutes before failing with ENOSPC.
+        per_job_gb = max(1, (size_gb - 1) // num_jobs)
         duration_desc = f"{duration_sec}s" if duration_sec > 0 else f"{per_job_gb}GB"
         time_flags  = f"--time_based --runtime={duration_sec}" if duration_sec > 0 else ""
         direct_flag = "--direct=1" if direct else ""
@@ -1542,6 +1545,8 @@ def _sync_create_resources_only(
             prefill = (f"echo '[jenease] Pre-filling {size_gb}GB...' && "
                        f"dd if=/dev/zero of=/data/testfile bs=64M count={mb // 64 + 1} 2>&1 | "
                        f"grep -v '^$' | while IFS= read -r l; do echo \"[PREFILL] $l\"; done && ")
+        elif mode == "readwrite":
+            prefill = f"echo '[jenease] Laying out {per_job_gb * num_jobs}GB for rw — this may take several minutes...' && "
         cmd = (
             f"echo '[jenease] Starting fio ({fio_rw}, bs={block_size}, {num_jobs} jobs × {duration_desc}, "
             f"iodepth={iodepth}, engine={engine})...' && {prefill}{wrapped} && echo '[jenease] Workload complete.'"
@@ -1786,6 +1791,11 @@ async def prepull_workload_image(kubeconfig_url: str) -> str:
 
 def parse_fio_line(line: str, size_bytes: int = 0, fio_state: dict | None = None) -> dict:
     """Extract progress %, IO rate, and ETA from a fio status line (TTY or non-TTY format)."""
+    # "Run status group N (all jobs):" is a fio section header — appears every 2s
+    # during the readwrite layout phase and before the final summary.  It carries
+    # no data and produces a long stream of blank-looking lines; suppress it.
+    if line.startswith("Run status group"):
+        return {}
     result: dict = {"line": line}
 
     # TTY compact line: [W(1)][10.0%][w=234MiB/s][eta 07m:30s]

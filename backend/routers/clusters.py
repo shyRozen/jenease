@@ -18,10 +18,14 @@ from config import settings
 router = APIRouter(prefix="/api/clusters", tags=["clusters"])
 
 # ── My Clusters server-side cache ────────────────────────────────────────────
-# Keyed by username. Shared clusters (from DB) are refreshed inline each call.
+# ── My Clusters cache (per-user) ─────────────────────────────────────────────
 _CACHE_TTL = 300  # 5 minutes
 _clusters_cache: dict[str, dict] = {}   # {username: {clusters, fetched_at, token}}
-_fetching: set[str] = set()             # usernames currently being fetched
+_fetching: set[str] = set()
+
+# ── All Clusters cache (global, shared across all users) ──────────────────────
+_all_clusters_cache: dict = {}   # {clusters, fetched_at, token}
+_all_fetching: bool = False
 
 DEPLOY_JOB      = "qe-deploy-ocs-cluster"
 PROD_DEPLOY_JOB = "qe-deploy-ocs-cluster-prod"
@@ -458,10 +462,52 @@ async def destroy_log(session: dict = Depends(get_session)):
     }
 
 
+async def _do_refresh_all_cache(username: str, token: str) -> None:
+    """Refresh the global All Clusters cache in the background."""
+    global _all_fetching
+    if _all_fetching:
+        return
+    _all_fetching = True
+    try:
+        clusters = await _scan_all_clusters(username, token)
+        _all_clusters_cache["clusters"] = clusters
+        _all_clusters_cache["fetched_at"] = _time.time()
+        _all_clusters_cache["token"] = token
+    except Exception:
+        # Advance timestamp so we don't hammer Jenkins on every request after a failure
+        _all_clusters_cache["fetched_at"] = _time.time()
+    finally:
+        _all_fetching = False
+
+
 @router.get("/all")
 async def all_clusters(session: dict = Depends(get_session)):
-    """All active clusters across all users (no username filter)."""
-    jenkins = _make_client(session)
+    """All active clusters across all users — served from a 5-min global cache."""
+    username = session["username"]
+    token    = session["token"]
+    now = _time.time()
+
+    if not _all_clusters_cache:
+        # Cold start: block once so the user sees data immediately
+        if not _all_fetching:
+            await _do_refresh_all_cache(username, token)
+        else:
+            while _all_fetching:
+                await asyncio.sleep(0.1)
+        return _all_clusters_cache.get("clusters", [])
+
+    # Keep token current for background refresh
+    _all_clusters_cache["token"] = token
+
+    if now - _all_clusters_cache.get("fetched_at", 0) > _CACHE_TTL and not _all_fetching:
+        asyncio.create_task(_do_refresh_all_cache(username, token))
+
+    return _all_clusters_cache.get("clusters", [])
+
+
+async def _scan_all_clusters(username: str, token: str) -> list[dict]:
+    """Jenkins scan for all users' clusters — extracted so it can run in the background."""
+    jenkins = _make_client({"username": username, "token": token})
 
     deploy_builds, prod_builds, fdf_builds, destroy_builds, locker = await asyncio.gather(
         jenkins.get_job_builds(DEPLOY_JOB, limit=500),

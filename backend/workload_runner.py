@@ -5,6 +5,7 @@ Creates namespaces, PVCs, and pods for RBD / CephFS / NooBaa I/O workloads,
 streams pod logs back as an async generator, and cleans up on delete.
 """
 import asyncio
+import concurrent.futures
 import json
 import re
 import threading
@@ -13,6 +14,15 @@ from typing import AsyncGenerator, Optional
 
 import httpx
 import yaml
+
+# Dedicated thread pool for orchestrator operations (pod creation, Running poll).
+# Kept separate from the default asyncio pool used by get_pod_phase so that
+# frequent workload-phase checks never starve pod creation — the regression that
+# caused "Launching forever" after the PSA-label and 403-retry fixes made
+# _sync_create_resources_only hold threads 10× longer than before.
+_ORCH_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix="jenease-orch"
+)
 
 # ── constants ────────────────────────────────────────────────────────────────
 
@@ -531,7 +541,11 @@ async def create_workload(
 def _sync_get_pod_phase(kubeconfig_url: str, namespace: str, pod_name: str) -> str:
     try:
         core, _, _, api_client = _sync_load_k8s(kubeconfig_url)
-        pod = core.read_namespaced_pod(name=pod_name, namespace=namespace)
+        # _request_timeout=10 ensures the thread returns within 10s even on slow/proxy
+        # clusters. Without it the k8s call can block the thread pool slot for 60-70s
+        # after asyncio.wait_for already fired at 15s, causing pool starvation.
+        pod = core.read_namespaced_pod(name=pod_name, namespace=namespace,
+                                       _request_timeout=10)
         api_client.close()
         return pod.status.phase or "Pending"
     except Exception:
@@ -1321,7 +1335,7 @@ async def _backend_sync_monitor(sync_id: str, kubeconfig_url: str, pods: list) -
             _sync_signal_start(kubeconfig_url, group["pods"])
             _SYNC_GROUPS.pop(sync_id, None)
 
-    await loop.run_in_executor(None, _watch)
+    await loop.run_in_executor(_ORCH_POOL, _watch)
 
 
 async def _backend_sync_orchestrate(
@@ -1346,7 +1360,7 @@ async def _backend_sync_orchestrate(
     for i, spec in enumerate(wl_specs):
         try:
             await loop.run_in_executor(
-                None, _functools.partial(_sync_create_resources_only, **spec)
+                _ORCH_POOL, _functools.partial(_sync_create_resources_only, **spec)
             )
             print(f"[SYNC-ORCH] created {i+1}/{n}: {spec.get('pod_name')}", flush=True)
         except Exception as e:
@@ -1375,7 +1389,7 @@ async def _backend_sync_orchestrate(
             _t.sleep(3)
         api_client.close()
 
-    await loop.run_in_executor(None, _poll)
+    await loop.run_in_executor(_ORCH_POOL, _poll)
     print(f"[SYNC-ORCH] firing signal for {n} pods", flush=True)
     _sync_signal_start(kubeconfig_url, pods_with_offsets)
     print(f"[SYNC-ORCH] done", flush=True)
@@ -1614,7 +1628,7 @@ async def sync_create_all_workloads(
                 pass
         api_client.close()
 
-    asyncio.create_task(loop.run_in_executor(None, _orchestrate))
+    asyncio.create_task(loop.run_in_executor(_ORCH_POOL, _orchestrate))
 
 
 def _sync_check_image_status(kubeconfig_url: str) -> dict:

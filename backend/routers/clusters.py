@@ -1,5 +1,7 @@
 import asyncio
 import html as _html_mod
+import json
+import pathlib
 import re
 import time as _time
 from datetime import datetime
@@ -17,15 +19,57 @@ from config import settings
 
 router = APIRouter(prefix="/api/clusters", tags=["clusters"])
 
-# ── My Clusters server-side cache ────────────────────────────────────────────
-# ── My Clusters cache (per-user) ─────────────────────────────────────────────
-_CACHE_TTL = 300  # 5 minutes
+# ── Cluster list caches ────────────────────────────────────────────────────────
+_CACHE_TTL  = 300   # 5 minutes
+_CACHE_FILE = pathlib.Path(__file__).parent.parent / "data" / "clusters_cache.json"
+
+# My Clusters — per-user, keyed by username
 _clusters_cache: dict[str, dict] = {}   # {username: {clusters, fetched_at, token}}
 _fetching: set[str] = set()
 
-# ── All Clusters cache (global, shared across all users) ──────────────────────
+# All Clusters — global (same data for every user)
 _all_clusters_cache: dict = {}   # {clusters, fetched_at, token}
 _all_fetching: bool = False
+
+
+def _persist_caches() -> None:
+    """Write both caches to disk so they survive backend restarts."""
+    try:
+        _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _CACHE_FILE.write_text(json.dumps({
+            "all":   _all_clusters_cache,
+            "users": _clusters_cache,
+        }))
+    except Exception as _e:
+        print(f"[cache] persist failed: {_e}", flush=True)
+
+
+def _load_caches() -> None:
+    """Restore both caches from disk (called at startup before first request)."""
+    global _all_fetching
+    try:
+        if not _CACHE_FILE.exists():
+            return
+        data = json.loads(_CACHE_FILE.read_text())
+        _all_clusters_cache.update(data.get("all", {}))
+        _clusters_cache.update(data.get("users", {}))
+        n_users = len(_clusters_cache)
+        has_all = bool(_all_clusters_cache.get("clusters"))
+        print(f"[cache] Loaded from disk — all_clusters={'yes' if has_all else 'no'}, {n_users} user cache(s)", flush=True)
+    except Exception as _e:
+        print(f"[cache] load failed: {_e}", flush=True)
+
+
+async def warm_caches_on_startup(username: str, token: str) -> None:
+    """Refresh both cluster caches in the background right after startup.
+    Called from main.py lifespan using JENKINS_WARM_USER / JENKINS_WARM_TOKEN."""
+    print("[cache] Starting warm-up…", flush=True)
+    await asyncio.gather(
+        _do_refresh_all_cache(username, token),
+        _do_refresh_cache(username, token),
+        return_exceptions=True,
+    )
+    print("[cache] Warm-up complete", flush=True)
 
 DEPLOY_JOB      = "qe-deploy-ocs-cluster"
 PROD_DEPLOY_JOB = "qe-deploy-ocs-cluster-prod"
@@ -182,8 +226,8 @@ async def _do_refresh_cache(username: str, token: str) -> None:
             "fetched_at": _time.time(),
             "token": token,
         }
+        _persist_caches()
     except Exception:
-        # Keep stale data; advance fetched_at so we retry after TTL not immediately
         if username in _clusters_cache:
             _clusters_cache[username]["fetched_at"] = _time.time()
     finally:
@@ -470,8 +514,8 @@ async def _do_refresh_all_cache(username: str, token: str) -> None:
         _all_clusters_cache["clusters"] = clusters
         _all_clusters_cache["fetched_at"] = _time.time()
         _all_clusters_cache["token"] = token
+        _persist_caches()
     except Exception:
-        # Advance timestamp so we don't hammer Jenkins on every request after a failure
         _all_clusters_cache["fetched_at"] = _time.time()
     finally:
         _all_fetching = False

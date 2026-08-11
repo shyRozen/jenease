@@ -24,6 +24,7 @@ from routers import notifications as notifications_router
 from routers import shares as shares_router
 from routers.jobs import _build_catalog, _catalog, _catalog_ts
 import routers.jobs as jobs_module
+from routers.clusters import _load_caches, warm_caches_on_startup
 
 
 async def _warm_catalog():
@@ -45,11 +46,23 @@ async def _warm_catalog():
         print(f"[startup] Catalog warm failed (will build on first visit): {e}", flush=True)
 
 
+async def _warm_cluster_caches():
+    """Restore persisted caches from disk, then immediately refresh from Jenkins."""
+    _load_caches()   # instant — serves stale data from last run
+    import os
+    token    = os.environ.get("JENKINS_WARM_TOKEN", "")
+    username = os.environ.get("JENKINS_WARM_USER",  "")
+    if token and username:
+        await warm_caches_on_startup(username, token)
+    else:
+        print("[cache] No JENKINS_WARM_TOKEN/USER — caches will refresh on first user request", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     SQLModel.metadata.create_all(engine)
-    # Kick off catalog build in background — doesn't block startup
     asyncio.create_task(_warm_catalog())
+    asyncio.create_task(_warm_cluster_caches())
     yield
 
 

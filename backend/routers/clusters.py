@@ -227,7 +227,10 @@ async def _do_refresh_cache(username: str, token: str) -> None:
             "token": token,
         }
         _persist_caches()
-    except Exception:
+    except Exception as _e:
+        import traceback
+        print(f"[cache] _do_refresh_cache FAILED for {username}: {_e}", flush=True)
+        traceback.print_exc()
         if username in _clusters_cache:
             _clusters_cache[username]["fetched_at"] = _time.time()
     finally:

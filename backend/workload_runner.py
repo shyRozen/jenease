@@ -54,7 +54,15 @@ _K8S_LOAD_LOCK = threading.Lock()
 
 SYNC_POLL_CMD = (
     "echo '[jenease] Waiting for sync signal…' && "
-    "until [ -f /tmp/jenease-start ] || [ \"$(cat /jenease-sync/start 2>/dev/null)\" = 'true' ]; "
+    "T=$(cat /run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null); "
+    "N=$(cat /run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null); "
+    "until "
+      "wget -qO- --no-check-certificate --timeout=5 "
+      "--header \"Authorization: Bearer $T\" "
+      "\"https://kubernetes.default.svc/api/v1/namespaces/$N/configmaps/jenease-sync\" "
+      "2>/dev/null | grep -q '\"true\"' "
+      "|| [ -f /tmp/jenease-start ] "
+      "|| [ \"$(cat /jenease-sync/start 2>/dev/null)\" = 'true' ]; "
     "do sleep 1; done && "
     "echo '[jenease] ✓ All pods ready — starting IO' && "
 )
@@ -1134,16 +1142,18 @@ def _sync_setup_sync_configmap(core, rbac, client, namespace: str):
         pass
 
 
-def _sync_signal_start(kubeconfig_url: str, pods: list):
-    """Signal each pod to start IO via exec touch /tmp/jenease-start.
+_exec_proxy_lock = threading.Lock()   # serialise env-var mutation across threads
 
-    Strategy (per pod):
-      1. exec WITH proxy kwargs explicitly passed to websocket-client — for clusters
-         that need the squid proxy to reach the API server (IPv6, disconnected).
-      2. exec WITHOUT proxy — for clusters where the API server is directly reachable
-         and the squid proxy doesn't support WebSocket CONNECT tunneling.
-      3. CM PATCH fallback — HTTP (always works through proxy); pod reads it via the
-         mounted jenease-sync volume (propagation can take up to ~120s on some clusters).
+
+def _sync_signal_start(kubeconfig_url: str, pods: list):
+    """Signal each pod to start IO.
+
+    Primary: CM PATCH (HTTP, always works through any proxy) — pod picks it up
+    immediately via wget polling the k8s API internally (no external proxy needed).
+
+    Secondary: exec touch /tmp/jenease-start for non-proxy clusters where direct
+    WebSocket exec works. For proxy clusters websocket-client requires HTTPS_PROXY
+    env vars; we set them under a threading lock and restore after each call.
 
     pods: list of (namespace, pod_name, offset_sec).
     Groups by offset_sec; offset>0 groups wait their delay."""
@@ -1151,24 +1161,49 @@ def _sync_signal_start(kubeconfig_url: str, pods: list):
     from urllib.parse import urlparse
     from kubernetes.stream import stream as k8s_stream
     from kubernetes import client as _k8s_client
+    import os as _os
     import time as _time
 
     by_offset: dict = defaultdict(list)
     for ns, pn, offset in pods:
         by_offset[float(offset or 0)].append((ns, pn))
 
-    def _try_exec(core_obj, pn: str, ns: str, proxy_kwargs: dict) -> bool:
+    def _try_exec(core_obj, pn: str, ns: str, proxy_url: str = "") -> bool:
+        """Try exec touch. For proxy clusters, temporarily set HTTPS_PROXY env var."""
+        env_keys = ["HTTPS_PROXY", "https_proxy"]
         try:
-            k8s_stream(
-                core_obj.connect_get_namespaced_pod_exec,
-                pn, ns,
-                command=["touch", "/tmp/jenease-start"],
-                stderr=True, stdin=False, stdout=True, tty=False,
-                **proxy_kwargs,
-            )
-            return True
+            if proxy_url:
+                with _exec_proxy_lock:
+                    saved = {k: _os.environ.get(k) for k in env_keys}
+                    for k in env_keys:
+                        _os.environ[k] = proxy_url
+                    try:
+                        k8s_stream(
+                            core_obj.connect_get_namespaced_pod_exec,
+                            pn, ns,
+                            command=["touch", "/tmp/jenease-start"],
+                            stderr=True, stdin=False, stdout=True, tty=False,
+                        )
+                        return True
+                    except Exception as _e:
+                        print(f"[SYNC-SIGNAL] exec {pn} via proxy failed: {_e}", flush=True)
+                        return False
+                    finally:
+                        for k, v in saved.items():
+                            if v is None:
+                                _os.environ.pop(k, None)
+                            else:
+                                _os.environ[k] = v
+            else:
+                k8s_stream(
+                    core_obj.connect_get_namespaced_pod_exec,
+                    pn, ns,
+                    command=["touch", "/tmp/jenease-start"],
+                    stderr=True, stdin=False, stdout=True, tty=False,
+                )
+                return True
         except Exception as _e:
-            print(f"[SYNC-SIGNAL] exec {pn} failed ({proxy_kwargs.get('http_proxy_host', 'direct')}): {_e}", flush=True)
+            print(f"[SYNC-SIGNAL] exec {pn} direct failed: {_e}", flush=True)
             return False
 
     def _fire(delay_secs: float, ns_pod_pairs: list):
@@ -1178,53 +1213,26 @@ def _sync_signal_start(kubeconfig_url: str, pods: list):
                 _time.sleep(delay_secs)
 
             core, _, cfg, api_client = _sync_load_k8s(kubeconfig_url)
-
-            # Parse proxy URL for explicit WebSocket proxy kwargs (websocket-client accepts these)
-            proxy_kwargs: dict = {}
             raw_proxy = getattr(cfg, "proxy", None) or ""
-            if raw_proxy:
-                parsed = urlparse(raw_proxy)
-                proxy_kwargs = {
-                    "http_proxy_host": parsed.hostname or "",
-                    "http_proxy_port": parsed.port or 3128,
-                }
-
-            # No-proxy client (direct connection, for clusters where API is reachable directly)
-            cfg_direct = _k8s_client.Configuration()
-            cfg_direct.host           = cfg.host
-            cfg_direct.verify_ssl     = cfg.verify_ssl
-            cfg_direct.ssl_ca_cert    = cfg.ssl_ca_cert
-            cfg_direct.cert_file      = cfg.cert_file
-            cfg_direct.key_file       = cfg.key_file
-            cfg_direct.api_key        = dict(cfg.api_key)
-            cfg_direct.api_key_prefix = dict(cfg.api_key_prefix)
-            api_client_direct = _k8s_client.ApiClient(cfg_direct)
-            core_direct = _k8s_client.CoreV1Api(api_client_direct)
 
             for ns, pn in ns_pod_pairs:
-                exec_ok = False
+                # Always patch CM first — pod polls it immediately via wget inside the cluster
+                # (internal k8s API call, bypasses the external squid proxy entirely)
+                try:
+                    core.patch_namespaced_config_map(
+                        "jenease-sync", ns, {"data": {"start": "true"}}
+                    )
+                    print(f"[SYNC-SIGNAL] CM patched {ns} ✓", flush=True)
+                except Exception as _e:
+                    print(f"[SYNC-SIGNAL] CM patch failed {ns}: {_e}", flush=True)
 
-                # Attempt 1: exec with explicit proxy kwargs (handles proxy-required clusters)
-                if proxy_kwargs:
-                    exec_ok = _try_exec(core, pn, ns, proxy_kwargs)
-
-                # Attempt 2: exec direct (no proxy — handles clusters where squid blocks WS)
-                if not exec_ok:
-                    exec_ok = _try_exec(core_direct, pn, ns, {})
-
-                if exec_ok:
-                    print(f"[SYNC-SIGNAL] exec touch {pn} ✓", flush=True)
+                # Also try exec so /tmp/jenease-start is created (belt-and-suspenders
+                # for non-proxy clusters; no-op if wget already fired the pod)
+                if raw_proxy:
+                    _try_exec(core, pn, ns, raw_proxy)
                 else:
-                    # Fallback: CM patch — pod reads it via mounted volume (eventually)
-                    try:
-                        core.patch_namespaced_config_map(
-                            "jenease-sync", ns, {"data": {"start": "true"}}
-                        )
-                        print(f"[SYNC-SIGNAL] CM patch fallback {ns} ✓", flush=True)
-                    except Exception as _e:
-                        print(f"[SYNC-SIGNAL] CM patch failed {ns}: {_e}", flush=True)
+                    _try_exec(core, pn, ns, "")
 
-            api_client_direct.close()
             api_client.close()
         except Exception as _top:
             print(f"[SYNC-SIGNAL] _fire CRASHED: {type(_top).__name__}: {_top}", flush=True)

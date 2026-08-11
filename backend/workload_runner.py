@@ -24,6 +24,14 @@ _ORCH_POOL = concurrent.futures.ThreadPoolExecutor(
     max_workers=8, thread_name_prefix="jenease-orch"
 )
 
+
+def _pvc_gi(size_gb: int) -> str:
+    """Return a PVC storage string that adds ~10%+2Gi overhead so fio can use the
+    full requested size without hitting ENOSPC on Ceph RBD (XFS journal + metadata
+    typically consumes 2-5% of the block device capacity).
+    Examples: 10GB → '13Gi', 50GB → '58Gi', 100GB → '113Gi'."""
+    return f"{size_gb + max(2, size_gb // 10) + 1}Gi"
+
 # ── constants ────────────────────────────────────────────────────────────────
 
 STORAGE_CLASSES = {
@@ -315,7 +323,7 @@ def _sync_create_io_workload(
                 access_modes=[access_mode],
                 storage_class_name=sc,
                 resources=client.V1ResourceRequirements(
-                    requests={"storage": f"{size_gb}Gi"}
+                    requests={"storage": _pvc_gi(size_gb)}
                 ),
             ),
         ),
@@ -947,7 +955,7 @@ async def create_and_stream_workload(
                         spec=client.V1PersistentVolumeClaimSpec(
                             access_modes=[acc_mode],
                             storage_class_name=sc,
-                            resources=client.V1ResourceRequirements(requests={"storage": f"{size_gb}Gi"}),
+                            resources=client.V1ResourceRequirements(requests={"storage": _pvc_gi(size_gb)}),
                         ),
                     ),
                 )
@@ -1521,14 +1529,11 @@ def _sync_create_resources_only(
             metadata=client.V1ObjectMeta(name=pvc_name),
             spec=client.V1PersistentVolumeClaimSpec(
                 access_modes=[acc_mode], storage_class_name=sc,
-                resources=client.V1ResourceRequirements(requests={"storage": f"{size_gb}Gi"}),
+                resources=client.V1ResourceRequirements(requests={"storage": _pvc_gi(size_gb)}),
             ),
         ))
         fio_rw     = FIO_RW.get((mode, pattern), "write")
-        # Use 90% of requested size to avoid ENOSPC: filesystem overhead on Ceph RBD
-        # (XFS journal + metadata) consumes ~2-5% of PVC capacity, so a flat 1GB
-        # margin was enough for 10GB but not for 50GB+. 90% leaves ~5GB on a 50GB PVC.
-        per_job_gb = max(1, (size_gb * 9 // 10) // num_jobs)
+        per_job_gb = max(1, size_gb // num_jobs)
         duration_desc = f"{duration_sec}s" if duration_sec > 0 else f"{per_job_gb}GB"
         time_flags  = f"--time_based --runtime={duration_sec}" if duration_sec > 0 else ""
         direct_flag = "--direct=1" if direct else ""

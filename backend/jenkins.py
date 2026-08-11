@@ -66,10 +66,14 @@ class JenkinsClient:
         if include_causes:
             fields += ",actions[causes[upstreamProject,upstreamBuild,upstreamUrl]]"
 
+        # Bulk build-list queries can be slow on large jobs — use a longer timeout
+        # than the default 30s so allBuilds on high-build-count jobs doesn't time out.
+        _bulk_defaults = {**_CLIENT_DEFAULTS, "timeout": 90.0}
+
         async def _fetch(prop: str) -> tuple[bool, list[dict]]:
             """Returns (property_exists, builds_list)."""
             params = {"tree": f"{prop}[{fields}]{{{0},{limit}}}"}
-            async with self._client() as c:
+            async with httpx.AsyncClient(auth=self.auth, **_bulk_defaults) as c:
                 r = await c.get(url, params=params)
             if r.status_code == 200:
                 data = r.json()
@@ -78,7 +82,7 @@ class JenkinsClient:
                     return True, data[prop]
                 return False, []
             if r.status_code in (401, 403):
-                async with httpx.AsyncClient(**_CLIENT_DEFAULTS) as anon:
+                async with httpx.AsyncClient(**_bulk_defaults) as anon:
                     r2 = await anon.get(url, params=params)
                 if r2.status_code == 200:
                     data = r2.json()

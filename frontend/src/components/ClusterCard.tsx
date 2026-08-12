@@ -165,8 +165,10 @@ function PwField({ password }: { password?: string }) {
 
 export default function ClusterCard({ cluster, isOwner = true }: { cluster: ClusterInfo; isOwner?: boolean }) {
   const { data: stageData } = useQuery<{ stage: string | null; queue_since?: string; paused_at?: string }>({
-    queryKey: ['stage', cluster.cluster_name],
-    queryFn: () => api.get(`/clusters/${cluster.cluster_name}/stage`),
+    queryKey: ['stage', cluster.cluster_name, cluster.build_num],
+    queryFn: () => api.get(
+      `/clusters/${cluster.cluster_name}/stage${cluster.build_num ? `?build_num=${cluster.build_num}` : ''}`
+    ),
     enabled: cluster.building && !cluster.destroying,
     staleTime: 25_000,
     refetchInterval: 30_000,

@@ -1316,39 +1316,61 @@ async def cluster_iops_stream(
 
 
 @router.get("/{cluster_name}/stage")
-async def cluster_stage(cluster_name: str, session: dict = Depends(get_session)):
+async def cluster_stage(
+    cluster_name: str,
+    session: dict = Depends(get_session),
+    build_num: Optional[int] = None,
+):
     """Current Jenkins pipeline stage for a building cluster.
-    Checks locker queue if in Initialization."""
+    Accepts build_num from the cluster list so Jenkins scanning is skipped
+    when the caller already knows the build number (avoids N×param fetches)."""
     jenkins = _make_client(session)
 
-    # Find the building build for this cluster.
-    # Limits ≤100 use the fast 'builds' property (not the slow allBuilds scan).
-    all_job_builds = await asyncio.gather(
-        jenkins.get_job_builds(DEPLOY_JOB, limit=50),
-        jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=50),
-        jenkins.get_job_builds(FDF_DEPLOY_JOB, limit=50),
-    )
-
-    build_num: Optional[int] = None
-    build_url: Optional[str] = None
     found_job = DEPLOY_JOB
-    for job, builds in zip([DEPLOY_JOB, PROD_DEPLOY_JOB, FDF_DEPLOY_JOB], all_job_builds):
-        # Enrich building builds with no description
-        no_desc = [b for b in builds if b.get("building") and not _cluster_name_from_desc(b.get("description", "") or "")]
-        if no_desc:
-            pr = await asyncio.gather(*[_get_build_params_safe(jenkins, job, b["number"]) for b in no_desc])
-            for build, params in zip(no_desc, pr):
-                if params.get("CLUSTER_NAME"):
-                    build["_param_cluster_name"] = params["CLUSTER_NAME"]
-        for b in builds:
-            name = _cluster_name_from_desc(b.get("description", "") or "") or b.get("_param_cluster_name")
-            if name == cluster_name and b.get("building"):
-                build_num = b["number"]
-                found_job = job
-                build_url = f"{settings.jenkins_url}/job/{job}/{build_num}"
+    build_url: Optional[str] = None
+
+    if build_num and build_num > 0:
+        # Fast path: caller supplied the build number — go straight to wfapi.
+        # Try each deploy job until wfapi returns something useful.
+        for job in [DEPLOY_JOB, PROD_DEPLOY_JOB, FDF_DEPLOY_JOB]:
+            test_url = f"{settings.jenkins_url}/job/{job}/{build_num}/wfapi/describe"
+            try:
+                async with httpx.AsyncClient(timeout=5, verify=False) as c:
+                    r = await c.get(test_url, auth=(session["username"], session["token"]))
+                if r.status_code == 200 and r.json().get("stages") is not None:
+                    found_job = job
+                    build_url = f"{settings.jenkins_url}/job/{job}/{build_num}"
+                    break
+            except Exception:
+                pass
+        # If none matched, default to DEPLOY_JOB with supplied build_num
+        if not build_url:
+            build_url = f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{build_num}"
+    else:
+        # Slow path: scan recent builds to find the currently-building one.
+        # Only 50 builds needed — building clusters are always near the top.
+        all_job_builds = await asyncio.gather(
+            jenkins.get_job_builds(DEPLOY_JOB, limit=50),
+            jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=50),
+            jenkins.get_job_builds(FDF_DEPLOY_JOB, limit=50),
+        )
+        build_num = None
+        for job, builds in zip([DEPLOY_JOB, PROD_DEPLOY_JOB, FDF_DEPLOY_JOB], all_job_builds):
+            no_desc = [b for b in builds if b.get("building") and not _cluster_name_from_desc(b.get("description", "") or "")]
+            if no_desc:
+                pr = await asyncio.gather(*[_get_build_params_safe(jenkins, job, b["number"]) for b in no_desc])
+                for build, params in zip(no_desc, pr):
+                    if params.get("CLUSTER_NAME"):
+                        build["_param_cluster_name"] = params["CLUSTER_NAME"]
+            for b in builds:
+                name = _cluster_name_from_desc(b.get("description", "") or "") or b.get("_param_cluster_name")
+                if name == cluster_name and b.get("building"):
+                    build_num = b["number"]
+                    found_job = job
+                    build_url = f"{settings.jenkins_url}/job/{job}/{build_num}"
+                    break
+            if build_num:
                 break
-        if build_num:
-            break
 
     if not build_num:
         return {"stage": None}

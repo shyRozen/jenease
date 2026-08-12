@@ -1321,12 +1321,12 @@ async def cluster_stage(cluster_name: str, session: dict = Depends(get_session))
     Checks locker queue if in Initialization."""
     jenkins = _make_client(session)
 
-    # Find the building build for this cluster
-    # Search across all deploy jobs (QE + prod + FDF) for a building build
+    # Find the building build for this cluster.
+    # Limits ≤100 use the fast 'builds' property (not the slow allBuilds scan).
     all_job_builds = await asyncio.gather(
-        jenkins.get_job_builds(DEPLOY_JOB, limit=200),
-        jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=200),
-        jenkins.get_job_builds(FDF_DEPLOY_JOB, limit=100),
+        jenkins.get_job_builds(DEPLOY_JOB, limit=50),
+        jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=50),
+        jenkins.get_job_builds(FDF_DEPLOY_JOB, limit=50),
     )
 
     build_num: Optional[int] = None

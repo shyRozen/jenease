@@ -93,10 +93,15 @@ class JenkinsClient:
             r.raise_for_status()
             return False, []
 
-        # allBuilds bypasses Jenkins' hard 100-build cap on the 'builds' property.
-        # If the Jenkins instance supports it, use it; otherwise fall back to builds.
-        supported, builds = await _fetch("allBuilds")
-        if not supported:
+        # allBuilds bypasses Jenkins' 100-build server cap, but scanning the full
+        # build history is slow (2-10s per job). Only use it when the requested limit
+        # exceeds what 'builds' can return — for small limits (stage checks, diagnostics)
+        # 'builds' is always sufficient since recent/building jobs are at the top.
+        if limit > 100:
+            supported, builds = await _fetch("allBuilds")
+            if not supported:
+                _, builds = await _fetch("builds")
+        else:
             _, builds = await _fetch("builds")
         return builds
 

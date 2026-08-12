@@ -183,6 +183,19 @@ class JenkinsClient:
         match = re.search(r"/queue/item/(\d+)/", location)
         return int(match.group(1)) if match else 0
 
+    async def get_queue_item(self, item_id: int) -> dict:
+        """Return queue item info. executable.number is set once the build starts."""
+        async with self._client() as c:
+            r = await c.get(f"{self.base}/queue/item/{item_id}/api/json")
+        if r.status_code == 200:
+            return r.json()
+        if r.status_code in (401, 403):
+            async with httpx.AsyncClient(**_CLIENT_DEFAULTS) as anon:
+                r2 = await anon.get(f"{self.base}/queue/item/{item_id}/api/json")
+            if r2.status_code == 200:
+                return r2.json()
+        return {}
+
     async def abort_build(self, job: str, build_num: int) -> None:
         await self._post(f"/job/{job}/{build_num}/stop")
 

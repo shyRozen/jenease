@@ -12,7 +12,7 @@ from auth import get_session
 from config import settings
 from jenkins import JenkinsClient
 from job_parser import parse_job
-from routers.clusters import inject_building_cluster
+from routers.clusters import inject_building_cluster, update_cluster_build
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -292,5 +292,24 @@ async def trigger_job(body: TriggerRequest, session: dict = Depends(get_session)
         username, body.cluster_name, build_url,
         ocp_version, ocs_version, credentials_conf, platform_conf, osd_size,
     )
+
+    # Background: poll the queue item until Jenkins assigns a build number, then
+    # patch the provisional cache entry so the Jenkins link shows the correct build.
+    if queue_item:
+        async def _resolve_build_num():
+            for _ in range(30):   # up to 60s (30 × 2s)
+                await asyncio.sleep(2)
+                try:
+                    info = await jenkins.get_queue_item(queue_item)
+                    exe  = info.get("executable") or {}
+                    num  = exe.get("number", 0)
+                    if num:
+                        url = exe.get("url") or f"{settings.jenkins_url}/job/{target_job}/{num}/"
+                        update_cluster_build(username, body.cluster_name, num, url.rstrip("/") + "/")
+                        print(f"[TRIGGER] build number resolved: #{num} for {body.cluster_name}", flush=True)
+                        return
+                except Exception:
+                    pass
+        asyncio.create_task(_resolve_build_num())
 
     return {"queue_item": queue_item, "job": target_job, "cluster_name": body.cluster_name}

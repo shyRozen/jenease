@@ -286,6 +286,18 @@ def inject_building_cluster(
     entry["clusters"] = [provisional, *clusters]
 
 
+def update_cluster_build(username: str, cluster_name: str, build_num: int, build_url: str) -> None:
+    """Patch the build_num/build_url on a provisional cache entry once Jenkins assigns a number."""
+    entry = _clusters_cache.get(username)
+    if not entry:
+        return
+    for c in entry.get("clusters", []):
+        if c.get("cluster_name") == cluster_name and c.get("build_num", 0) == 0:
+            c["build_num"] = build_num
+            c["build_url"] = build_url
+            break
+
+
 def clear_user_cache(username: str) -> None:
     _clusters_cache.pop(username, None)
     _fetching.discard(username)

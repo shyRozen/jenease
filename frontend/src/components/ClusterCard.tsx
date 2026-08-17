@@ -191,7 +191,9 @@ export default function ClusterCard({ cluster, isOwner = true }: { cluster: Clus
 
   const { data: health, isLoading: healthLoading } = useQuery<HealthData>({
     queryKey: ['health', cluster.cluster_name],
-    queryFn: () => api.get(`/clusters/${cluster.cluster_name}/health`),
+    queryFn: () => api.get(
+      `/clusters/${cluster.cluster_name}/health${cluster.kubeconfig_url ? `?kubeconfig_url=${encodeURIComponent(cluster.kubeconfig_url)}` : ''}`
+    ),
     enabled: (!cluster.building || isLateStage) && !cluster.destroying,
     staleTime: 5_000,
     refetchInterval: 8_000,

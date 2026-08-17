@@ -735,33 +735,47 @@ async def _scan_all_clusters(username: str, token: str) -> list[dict]:
 
 
 @router.get("/{cluster_name}/health")
-async def cluster_health(cluster_name: str, session: dict = Depends(get_session)):
-    """Level 1 health: nodes + ODF status via kubeconfig. May take 10-30s."""
-    jenkins = _make_client(session)
+async def cluster_health(
+    cluster_name: str,
+    session: dict = Depends(get_session),
+    kubeconfig_url: Optional[str] = None,
+):
+    """Level 1 health: nodes + ODF status via kubeconfig.
+    Pass kubeconfig_url to skip the Jenkins scan (faster, fixes NOT_FOUND)."""
     username = session["username"]
 
-    all_builds = await asyncio.gather(
-        jenkins.get_job_builds(DEPLOY_JOB, limit=200),
-        jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=200),
-        jenkins.get_job_builds(FDF_DEPLOY_JOB, limit=100),
-    )
-    target = None
-    for builds in all_builds:
-        for b in builds:
-            name = _cluster_name_from_desc(b.get("description", "") or "")
-            if name == cluster_name:
-                target = b
-                break
+    if kubeconfig_url:
+        # Fast path: caller already knows the kubeconfig URL — skip Jenkins entirely.
+        # Fixes both NOT_FOUND scenarios: scan-depth mismatch (health scans fewer
+        # builds than all_clusters) and description-only matching (locker-detected
+        # clusters have no description yet so the scan never finds them).
+        parsed = {"kubeconfig_url": kubeconfig_url}
+        target = {"building": False}  # assume deployed; health check will clarify
+    else:
+        jenkins = _make_client(session)
+        all_builds = await asyncio.gather(
+            jenkins.get_job_builds(DEPLOY_JOB, limit=200),
+            jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=200),
+            jenkins.get_job_builds(FDF_DEPLOY_JOB, limit=100),
+        )
+        target = None
+        for builds in all_builds:
+            for b in builds:
+                name = _cluster_name_from_desc(b.get("description", "") or "")
+                if name == cluster_name:
+                    target = b
+                    break
         if target:
             break
 
     if not target:
         return {"status": "NOT_FOUND"}
 
-    parsed = JenkinsClient.parse_build_description(target.get("description", "") or "")
-
-    if target.get("building") and not parsed.get("kubeconfig_url"):
-        return {"status": "BUILDING"}
+    if not kubeconfig_url:
+        # Slow path only: parse description to get URLs
+        parsed = JenkinsClient.parse_build_description(target.get("description", "") or "")
+        if target.get("building") and not parsed.get("kubeconfig_url"):
+            return {"status": "BUILDING"}
 
     health = await fetch_cluster_health(
         console_url=parsed.get("console_url"),
@@ -1416,13 +1430,25 @@ async def cluster_stage(
                 current = s["name"]
                 break
 
+    # If wfapi has no stage data yet (build is pre-pipeline — agent allocation,
+    # locker queue, Groovy setup) check the locker and fall back to "init".
+    # This is the most common reason substatus shows nothing for early builds.
+    queue_since: Optional[str] = None
+    if not current and build_url:
+        locker = await _fetch_locker_queue()
+        build_clean = build_url.rstrip('/')
+        for url, ts in locker.items():
+            if url.rstrip('/') == build_clean:
+                return {"stage": "locker_queue", "queue_since": ts}
+        # Not in locker — build is starting up, show generic init
+        return {"stage": "init"}
+
     if not current:
         return {"stage": None}
 
     short = STAGE_SHORT.get(current, current.lower().replace(" ", "_"))
 
     # If in Initialization check if blocked on locker queue
-    queue_since: Optional[str] = None
     if current == "Initialization" and build_url:
         locker = await _fetch_locker_queue()
         build_clean = build_url.rstrip('/')

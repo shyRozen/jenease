@@ -490,14 +490,24 @@ export default function AllClusters({ username }: { username: string }) {
       list = list.filter(c => statusFilter.has(jenkinsStatus(c)))
     if (ownerFilter.size)
       list = list.filter(c => ownerFilter.has(c.owner))
-    // Hide clusters with no kubeconfig/deployed yet — they'd show NOT_FOUND on health check
-    if (hideNotFound)
-      list = list.filter(c => !(!c.kubeconfig_url && !c.building))
     return list
-  }, [clusters, search, platformFilter, statusFilter, ownerFilter, hideNotFound])
+  }, [clusters, search, platformFilter, statusFilter, ownerFilter])
 
-  const sorted = useMemo(() => sortClusters(filtered, sortBy), [filtered, sortBy])
   const queryClient = useQueryClient()
+
+  // Apply UNREACHABLE/NOT_FOUND filter after health queries have run.
+  // Checks the TanStack cache so it reacts as health results arrive.
+  // If health hasn't been fetched yet we show the cluster (don't pre-hide).
+  const filteredVisible = useMemo(() => {
+    if (!hideNotFound) return filtered
+    return filtered.filter(c => {
+      const h = queryClient.getQueryData<{ status: string }>(['health', c.cluster_name])
+      if (!h) return true  // health not yet fetched — keep visible
+      return h.status !== 'NOT_FOUND' && h.status !== 'UNREACHABLE'
+    })
+  }, [filtered, hideNotFound, queryClient])
+
+  const sorted = useMemo(() => sortClusters(filteredVisible, sortBy), [filteredVisible, sortBy])
   const grouped = useMemo(() => groupClusters(sorted, groupBy, queryClient), [sorted, groupBy, queryClient])
 
   const SelectBtn = ({ value, current, set, label }: { value: string; current: string; set: (v: any) => void; label: string }) => (
@@ -517,7 +527,7 @@ export default function AllClusters({ username }: { username: string }) {
           <div>
             <h1 className="text-sm font-mono font-semibold text-text-primary">All Clusters</h1>
             <p className="text-[10px] font-mono text-text-muted mt-0.5">
-              {isLoading ? 'Loading…' : `${filtered.length} / ${clusters.length} clusters`}
+              {isLoading ? 'Loading…' : `${filteredVisible.length} / ${clusters.length} clusters`}
             </p>
           </div>
           {/* View toggle */}
@@ -553,7 +563,7 @@ export default function AllClusters({ username }: { username: string }) {
               onChange={e => setHideNotFound(e.target.checked)}
               className="accent-accent-cyan w-3 h-3"
             />
-            <span className="text-[10px] font-mono text-text-muted">Hide NOT_FOUND (no kubeconfig yet)</span>
+            <span className="text-[10px] font-mono text-text-muted">Hide unreachable / not found</span>
           </label>
         </div>
 
@@ -579,7 +589,7 @@ export default function AllClusters({ username }: { username: string }) {
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-6 py-4">
         {isLoading && <p className="text-xs font-mono text-text-muted animate-pulse">Loading clusters…</p>}
-        {!isLoading && filtered.length === 0 && (
+        {!isLoading && filteredVisible.length === 0 && (
           <p className="text-xs font-mono text-text-muted">No clusters match your filters.</p>
         )}
 

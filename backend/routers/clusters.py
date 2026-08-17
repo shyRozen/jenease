@@ -765,8 +765,8 @@ async def cluster_health(
                 if name == cluster_name:
                     target = b
                     break
-        if target:
-            break
+            if target:
+                break
 
     if not target:
         return {"status": "NOT_FOUND"}

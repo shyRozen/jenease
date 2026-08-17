@@ -155,8 +155,10 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
   const isMe = c.owner === me
 
   const { data: stageData } = useQuery<{ stage: string | null; queue_since?: string; paused_at?: string }>({
-    queryKey: ['stage', c.cluster_name],
-    queryFn: () => api.get(`/clusters/${c.cluster_name}/stage`),
+    queryKey: ['stage', c.cluster_name, c.build_num],
+    queryFn: () => api.get(
+      `/clusters/${c.cluster_name}/stage${c.build_num ? `?build_num=${c.build_num}` : ''}`
+    ),
     enabled: c.building && !c.destroying,
     staleTime: 25_000,
     refetchInterval: 30_000,
@@ -188,7 +190,9 @@ function ClusterRow({ c, me }: { c: ClusterEntry; me: string }) {
 
   const { data: health } = useQuery({
     queryKey: ['health', c.cluster_name],
-    queryFn: () => api.get<{ status: string; degraded_reason?: string | null }>(`/clusters/${c.cluster_name}/health`),
+    queryFn: () => api.get<{ status: string; degraded_reason?: string | null }>(
+      `/clusters/${c.cluster_name}/health${c.kubeconfig_url ? `?kubeconfig_url=${encodeURIComponent(c.kubeconfig_url)}` : ''}`
+    ),
     enabled: (!c.building || isLateStage) && !c.destroying,
     staleTime: 30_000,
     retry: false,
@@ -453,6 +457,7 @@ export default function AllClusters({ username }: { username: string }) {
   const [sortBy, setSortBy]   = useState<SortKey>('age')
   const [groupBy, setGroupBy] = useState<GroupKey>('owner')
   const [view, setView]       = useState<'box' | 'list'>('list')
+  const [hideNotFound, setHideNotFound] = useState(true)
 
   // Derive available filter options
   const platforms = useMemo(() =>
@@ -485,8 +490,11 @@ export default function AllClusters({ username }: { username: string }) {
       list = list.filter(c => statusFilter.has(jenkinsStatus(c)))
     if (ownerFilter.size)
       list = list.filter(c => ownerFilter.has(c.owner))
+    // Hide clusters with no kubeconfig/deployed yet — they'd show NOT_FOUND on health check
+    if (hideNotFound)
+      list = list.filter(c => !(!c.kubeconfig_url && !c.building))
     return list
-  }, [clusters, search, platformFilter, statusFilter, ownerFilter])
+  }, [clusters, search, platformFilter, statusFilter, ownerFilter, hideNotFound])
 
   const sorted = useMemo(() => sortClusters(filtered, sortBy), [filtered, sortBy])
   const queryClient = useQueryClient()
@@ -538,6 +546,15 @@ export default function AllClusters({ username }: { username: string }) {
           <Chips label="Platform" options={platforms} selected={platformFilter} onChange={setPlatformFilter} />
           <Chips label="Status"   options={statuses}  selected={statusFilter}   onChange={setStatusFilter} />
           <Chips label="Owner"    options={owners}     selected={ownerFilter}    onChange={setOwnerFilter} />
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={hideNotFound}
+              onChange={e => setHideNotFound(e.target.checked)}
+              className="accent-accent-cyan w-3 h-3"
+            />
+            <span className="text-[10px] font-mono text-text-muted">Hide NOT_FOUND (no kubeconfig yet)</span>
+          </label>
         </div>
 
         {/* Sort + Group */}

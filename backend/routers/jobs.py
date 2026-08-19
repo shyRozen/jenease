@@ -93,8 +93,13 @@ def _normalize_params(raw: list) -> list[dict]:
     return result
 
 
-async def _build_catalog(jenkins: JenkinsClient) -> list[dict]:
-    """Fetch all qe-trigger-*-deployment jobs, parse names, and merge with full deploy params."""
+async def _build_catalog(jenkins: JenkinsClient) -> tuple[list[dict], bool]:
+    """Fetch all qe-trigger-*-deployment jobs, parse names, and merge with full deploy params.
+
+    Returns (catalog, is_complete) — is_complete is False when the full deploy
+    params could not be fetched, meaning the catalog only has trigger-job params
+    and should NOT be saved to disk (next request will retry).
+    """
     all_jobs = await jenkins.get_all_jobs()
     trigger_jobs = [
         j["name"] for j in all_jobs
@@ -106,9 +111,11 @@ async def _build_catalog(jenkins: JenkinsClient) -> list[dict]:
     parsed = [parse_job(name) for name in trigger_jobs]
 
     # Fetch full deploy job params ONCE — same schema for all trigger jobs
+    full_params_ok = False
     try:
         full_raw = await jenkins.get_job_params_schema(FULL_DEPLOY_JOB)
         full_params = _normalize_params(full_raw)
+        full_params_ok = len(full_params) > 20  # sanity check: real schema has 80+ params
     except Exception:
         full_params = []
 
@@ -146,7 +153,7 @@ async def _build_catalog(jenkins: JenkinsClient) -> list[dict]:
 
         job_meta["params"] = merged
 
-    return parsed
+    return parsed, full_params_ok
 
 
 # ── endpoints ────────────────────────────────────────────────────────────────
@@ -160,9 +167,14 @@ async def list_deployments(session: dict = Depends(get_session)):
         return _catalog
 
     jenkins = _make_client(session)
-    _catalog = await _build_catalog(jenkins)
+    _catalog, is_complete = await _build_catalog(jenkins)
     _catalog_ts = time.time()
-    _save_catalog_to_disk(_catalog, _catalog_ts)
+    if is_complete:
+        _save_catalog_to_disk(_catalog, _catalog_ts)
+    else:
+        # Full deploy params unavailable — don't persist so next request retries
+        print("[CATALOG] incomplete build (qe-deploy-ocs-cluster unreachable) — skipping disk cache", flush=True)
+        _catalog_ts = 0.0  # expire immediately so next request rebuilds
     return _catalog
 
 

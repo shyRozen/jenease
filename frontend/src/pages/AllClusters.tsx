@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
@@ -495,6 +495,21 @@ export default function AllClusters({ username }: { username: string }) {
 
   const queryClient = useQueryClient()
 
+  // Increment whenever any health query settles so filteredVisible recomputes.
+  // queryClient reference is stable — getQueryData alone won't trigger a re-render.
+  const [healthTick, setHealthTick] = useState(0)
+  useEffect(() => {
+    return queryClient.getQueryCache().subscribe(event => {
+      if (
+        event.type === 'updated' &&
+        Array.isArray(event.query.queryKey) &&
+        event.query.queryKey[0] === 'health'
+      ) {
+        setHealthTick(t => t + 1)
+      }
+    })
+  }, [queryClient])
+
   // Apply UNREACHABLE/NOT_FOUND filter after health queries have run.
   // Checks the TanStack cache so it reacts as health results arrive.
   // If health hasn't been fetched yet we show the cluster (don't pre-hide).
@@ -505,7 +520,8 @@ export default function AllClusters({ username }: { username: string }) {
       if (!h) return true  // health not yet fetched — keep visible
       return h.status !== 'NOT_FOUND' && h.status !== 'UNREACHABLE'
     })
-  }, [filtered, hideNotFound, queryClient])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered, hideNotFound, queryClient, healthTick])
 
   const sorted = useMemo(() => sortClusters(filteredVisible, sortBy), [filteredVisible, sortBy])
   const grouped = useMemo(() => groupClusters(sorted, groupBy, queryClient), [sorted, groupBy, queryClient])

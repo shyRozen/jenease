@@ -54,13 +54,13 @@ function PrefetchManager({ username }: { username: string }) {
             if (health?.status === 'HEALTHY' || health?.status === 'DEGRADED') {
               queryClient.prefetchQuery({
                 queryKey: ['details', c.cluster_name],
-                queryFn: () => api.get(`/clusters/${c.cluster_name}/details`),
+                queryFn: () => api.get(`/clusters/${c.cluster_name}/details${c.kubeconfig_url ? `?kubeconfig_url=${encodeURIComponent(c.kubeconfig_url)}` : ''}`),
                 staleTime: 60_000,
               })
               // Auto-prepull: for owned clusters, kick off pull if any node is missing an image
               if (c.owner === username) {
-                api.get<{ all_cached: boolean }>(`/clusters/${c.cluster_name}/image-status`)
-                  .then(s => { if (!s.all_cached) api.post(`/clusters/${c.cluster_name}/prepull`, {}) })
+                api.get<{ all_cached: boolean }>(`/clusters/${c.cluster_name}/image-status${c.kubeconfig_url ? `?kubeconfig_url=${encodeURIComponent(c.kubeconfig_url)}` : ''}`)
+                  .then(s => { if (!s.all_cached) api.post(`/clusters/${c.cluster_name}/prepull?kubeconfig_url=${encodeURIComponent(c.kubeconfig_url ?? '')}`, {}) })
                   .catch(() => {})
               }
             }

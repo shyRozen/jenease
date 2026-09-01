@@ -394,7 +394,7 @@ export default function WorkloadPanel({
     all_cached: boolean
   }>({
     queryKey: ['image-status', clusterName],
-    queryFn: () => api.get(`/clusters/${clusterName}/image-status`),
+    queryFn: () => api.get(`/clusters/${clusterName}/image-status${kubeconfigUrl ? `?kubeconfig_url=${encodeURIComponent(kubeconfigUrl)}` : ''}`),
     staleTime: 60_000,
     refetchInterval: 90_000,
     enabled: showLauncher,

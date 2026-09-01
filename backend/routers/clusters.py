@@ -982,19 +982,26 @@ async def worker_nodes_endpoint(
 
 
 @router.get("/{cluster_name}/image-status")
-async def image_status_endpoint(cluster_name: str, session: dict = Depends(get_session)):
+async def image_status_endpoint(
+    cluster_name: str,
+    session: dict = Depends(get_session),
+    kubeconfig_url: Optional[str] = None,
+):
     """Check which worker nodes have fio + NooBaa images cached (no pods created)."""
-    jenkins = _make_client(session)
-    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
-    for b in builds:
-        if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
-            parsed = JenkinsClient.parse_build_description(b.get("description", "") or "")
-            if parsed.get("kubeconfig_url"):
-                try:
-                    return await check_image_status(parsed["kubeconfig_url"])
-                except Exception as e:
-                    raise HTTPException(502, f"Could not check image status: {e}")
-    raise HTTPException(404, "Cluster kubeconfig not found")
+    if not kubeconfig_url:
+        jenkins = _make_client(session)
+        builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+        for b in builds:
+            if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+                parsed = JenkinsClient.parse_build_description(b.get("description", "") or "")
+                kubeconfig_url = parsed.get("kubeconfig_url")
+                break
+    if not kubeconfig_url:
+        raise HTTPException(404, "Cluster kubeconfig not found")
+    try:
+        return await check_image_status(kubeconfig_url)
+    except Exception as e:
+        raise HTTPException(502, f"Could not check image status: {e}")
 
 
 def _run_fstrim(kubeconfig_url: str) -> str:
@@ -1237,36 +1244,50 @@ async def prepull_images(
     cluster_name: str,
     background_tasks: BackgroundTasks,
     session: dict = Depends(get_session),
+    kubeconfig_url: Optional[str] = None,
 ):
     """Pre-pull fio + NooBaa images on all worker nodes via a DaemonSet (fire-and-forget)."""
-    jenkins = _make_client(session)
-    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
-    for b in builds:
-        if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
-            parsed = JenkinsClient.parse_build_description(b.get("description", "") or "")
-            if parsed.get("kubeconfig_url"):
-                background_tasks.add_task(prepull_workload_image, parsed["kubeconfig_url"])
-                return {"ok": True, "message": "Pre-pull started — images will be ready on all nodes in ~5 minutes"}
-    raise HTTPException(404, "Cluster kubeconfig not found")
+    if not kubeconfig_url:
+        jenkins = _make_client(session)
+        builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+        for b in builds:
+            if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+                parsed = JenkinsClient.parse_build_description(b.get("description", "") or "")
+                kubeconfig_url = parsed.get("kubeconfig_url")
+                break
+    if not kubeconfig_url:
+        raise HTTPException(404, "Cluster kubeconfig not found")
+    background_tasks.add_task(prepull_workload_image, kubeconfig_url)
+    return {"ok": True, "message": "Pre-pull started — images will be ready on all nodes in ~5 minutes"}
 
 
 @router.get("/{cluster_name}/iops")
-async def cluster_iops_endpoint(cluster_name: str, session: dict = Depends(get_session)):
+async def cluster_iops_endpoint(
+    cluster_name: str,
+    session: dict = Depends(get_session),
+    kubeconfig_url: Optional[str] = None,
+):
     """Dedicated OSD IOPS endpoint — lighter than full health, called every 5s."""
-    jenkins = _make_client(session)
-    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
-    target = None
-    for b in builds:
-        if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
-            target = b
-            break
-    if not target:
-        return {}
-    parsed = JenkinsClient.parse_build_description(target.get("description", "") or "")
+    console_url = None
+    kubeadmin_password = None
+    if not kubeconfig_url:
+        jenkins = _make_client(session)
+        builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+        target = None
+        for b in builds:
+            if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+                target = b
+                break
+        if not target:
+            return {}
+        parsed = JenkinsClient.parse_build_description(target.get("description", "") or "")
+        kubeconfig_url = parsed.get("kubeconfig_url")
+        console_url = parsed.get("console_url")
+        kubeadmin_password = parsed.get("kubeadmin_password")
     result = await fetch_cluster_iops(
-        kubeconfig_url=parsed.get("kubeconfig_url"),
-        console_url=parsed.get("console_url"),
-        kubeadmin_password=parsed.get("kubeadmin_password"),
+        kubeconfig_url=kubeconfig_url,
+        console_url=console_url,
+        kubeadmin_password=kubeadmin_password,
     )
     return result
 
@@ -1500,61 +1521,72 @@ async def cluster_destroy_stage(cluster_name: str, build_num: int, session: dict
 
 
 @router.get("/{cluster_name}/kubeconfig")
-async def download_kubeconfig(cluster_name: str, session: dict = Depends(get_session)):
+async def download_kubeconfig(
+    cluster_name: str,
+    session: dict = Depends(get_session),
+    kubeconfig_url: Optional[str] = None,
+):
     """Proxy the kubeconfig from magna002 to the browser as a file download."""
     import httpx
     from fastapi.responses import Response
 
-    jenkins = _make_client(session)
     username = session["username"]
 
     if not _has_cluster_access(username, cluster_name):
-        from fastapi import HTTPException
         raise HTTPException(403, "Not your cluster")
 
-    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
-    for b in builds:
-        if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
-            parsed = JenkinsClient.parse_build_description(b.get("description", "") or "")
-            kubeconfig_url = parsed.get("kubeconfig_url")
-            if kubeconfig_url:
-                async with httpx.AsyncClient(timeout=10.0) as c:
-                    r = await c.get(kubeconfig_url)
-                    if r.is_success:
-                        return Response(
-                            content=r.content,
-                            media_type="application/x-yaml",
-                            headers={"Content-Disposition": f'attachment; filename="kubeconfig-{cluster_name}"'},
-                        )
-    from fastapi import HTTPException
+    if not kubeconfig_url:
+        jenkins = _make_client(session)
+        builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+        for b in builds:
+            if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+                parsed = JenkinsClient.parse_build_description(b.get("description", "") or "")
+                kubeconfig_url = parsed.get("kubeconfig_url")
+                break
+    if not kubeconfig_url:
+        raise HTTPException(404, "Kubeconfig not found")
+
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        r = await c.get(kubeconfig_url)
+        if r.is_success:
+            return Response(
+                content=r.content,
+                media_type="application/x-yaml",
+                headers={"Content-Disposition": f'attachment; filename="kubeconfig-{cluster_name}"'},
+            )
     raise HTTPException(404, "Kubeconfig not found")
 
 
 @router.get("/{cluster_name}/details")
-async def cluster_details(cluster_name: str, session: dict = Depends(get_session)):
+async def cluster_details(
+    cluster_name: str,
+    session: dict = Depends(get_session),
+    kubeconfig_url: Optional[str] = None,
+):
     """Level 2: pods, PVCs, node detail for the cluster detail view."""
-    jenkins = _make_client(session)
-    username = session["username"]
-
-    builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
-    target = None
-    for b in builds:
-        if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
-            target = b
-            break
-
-    if not target:
-        return {"error": "Not found"}
-
-    parsed = JenkinsClient.parse_build_description(target.get("description", "") or "")
-
-    if target.get("building") and not parsed.get("kubeconfig_url"):
-        return {"error": "Not available while building"}
+    console_url = None
+    kubeadmin_password = None
+    if not kubeconfig_url:
+        jenkins = _make_client(session)
+        builds = await jenkins.get_job_builds(DEPLOY_JOB, limit=200)
+        target = None
+        for b in builds:
+            if _cluster_name_from_desc(b.get("description", "") or "") == cluster_name:
+                target = b
+                break
+        if not target:
+            return {"error": "Not found"}
+        parsed = JenkinsClient.parse_build_description(target.get("description", "") or "")
+        if target.get("building") and not parsed.get("kubeconfig_url"):
+            return {"error": "Not available while building"}
+        kubeconfig_url = parsed.get("kubeconfig_url")
+        console_url = parsed.get("console_url")
+        kubeadmin_password = parsed.get("kubeadmin_password")
 
     details = await fetch_cluster_details(
-        console_url=parsed.get("console_url"),
-        kubeadmin_password=parsed.get("kubeadmin_password"),
-        kubeconfig_url=parsed.get("kubeconfig_url"),
+        console_url=console_url,
+        kubeadmin_password=kubeadmin_password,
+        kubeconfig_url=kubeconfig_url,
     )
     return details or {}
 

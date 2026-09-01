@@ -502,7 +502,7 @@ export default function ClusterDetail() {
 
   const { data: details, isLoading: detailsLoading } = useQuery<DetailsData>({
     queryKey: ['details', name],
-    queryFn: () => api.get(`/clusters/${name}/details`),
+    queryFn: () => api.get(`/clusters/${name}/details${kubeconfigUrl ? `?kubeconfig_url=${encodeURIComponent(kubeconfigUrl)}` : ''}`),
     staleTime: 60_000,
     retry: false,
     enabled: health?.status === 'HEALTHY' || health?.status === 'DEGRADED',

@@ -47,7 +47,7 @@ function PrefetchManager({ username }: { username: string }) {
         setTimeout(() => {
           queryClient.fetchQuery<{ status: string }>({
             queryKey: ['health', c.cluster_name],
-            queryFn: () => api.get(`/clusters/${c.cluster_name}/health`),
+            queryFn: () => api.get(`/clusters/${c.cluster_name}/health${c.kubeconfig_url ? `?kubeconfig_url=${encodeURIComponent(c.kubeconfig_url)}` : ''}`),
             staleTime: 30_000,
           }).then(health => {
             // Step 3: for reachable clusters prefetch full details + auto-prepull if needed

@@ -98,7 +98,16 @@ class JenkinsClient:
         # exceeds what 'builds' can return — for small limits (stage checks, diagnostics)
         # 'builds' is always sufficient since recent/building jobs are at the top.
         if limit > 100:
-            supported, builds = await _fetch("allBuilds")
+            # allBuilds can 504 or hang on huge jobs (e.g. qe-destroy-ocs-cluster has
+            # 80k+ builds). If it errors, degrade gracefully to the 100-cap 'builds'
+            # property rather than propagating the failure — a partial recent list is
+            # far better than freezing the whole cluster-scan cache on a stale snapshot.
+            try:
+                supported, builds = await _fetch("allBuilds")
+            except Exception as _e:
+                print(f"[JENKINS] allBuilds failed for {job} ({_e}) — "
+                      f"falling back to 'builds' (capped at 100)", flush=True)
+                supported, builds = False, []
             if not supported:
                 _, builds = await _fetch("builds")
         else:

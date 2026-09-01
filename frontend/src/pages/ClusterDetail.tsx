@@ -409,9 +409,23 @@ export default function ClusterDetail() {
   const isOwner = !!name && name.toLowerCase().startsWith(me.toLowerCase())
   // Shared rates ref so the list panel (left) and launcher panel (right) see the same MB/s for recording
   const sharedRatesRef = useRef<Record<number, number>>({})
+
+  const { data: clusterList = [] } = useQuery<any[]>({
+    queryKey: ['clusters'],
+    queryFn: () => api.get('/clusters/active'),
+    staleTime: 30_000,
+  })
+  const cluster = clusterList.find((c: any) => c.cluster_name === name)
+  const kubeconfigUrl = cluster?.kubeconfig_url
+
   const { data: health } = useQuery<HealthData>({
     queryKey: ['health', name],
-    queryFn: () => api.get(`/clusters/${name}/health`),
+    queryFn: () => {
+      const params = kubeconfigUrl
+        ? `?kubeconfig_url=${encodeURIComponent(kubeconfigUrl)}`
+        : ''
+      return api.get(`/clusters/${name}/health${params}`)
+    },
     staleTime: 3_000,
     retry: false,
     refetchInterval: 3_000,
@@ -494,15 +508,7 @@ export default function ClusterDetail() {
     enabled: health?.status === 'HEALTHY' || health?.status === 'DEGRADED',
   })
 
-  const { data: clusterList = [] } = useQuery<any[]>({
-    queryKey: ['clusters'],
-    queryFn: () => api.get('/clusters/active'),
-    staleTime: 30_000,
-  })
-  const cluster = clusterList.find((c: any) => c.cluster_name === name)
-
   // SSE stream — singleton kept alive across navigation (no reconnect = no spike)
-  const kubeconfigUrl = cluster?.kubeconfig_url
 
   // Read history synchronously during render so WorkloadPanel gets it on first mount,
   // before any effect runs. useMemo re-runs only when the cluster name changes.

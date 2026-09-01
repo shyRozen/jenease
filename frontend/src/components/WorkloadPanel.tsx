@@ -614,7 +614,7 @@ export default function WorkloadPanel({
   }, [])
   const { data: healthData } = useQuery<{ ceph_capacity?: { health?: string }; degraded_reason?: string; status?: string }>({
     queryKey: ['health', clusterName],
-    queryFn: () => api.get(`/clusters/${clusterName}/health`),
+    queryFn: () => api.get(`/clusters/${clusterName}/health${kubeconfigUrl ? `?kubeconfig_url=${encodeURIComponent(kubeconfigUrl)}` : ''}`),
     refetchInterval: 2_000,
     enabled: showList && workloads.length > 0,
   })

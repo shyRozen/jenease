@@ -160,7 +160,8 @@ def _make_client(session: dict) -> JenkinsClient:
 def _cluster_name_from_desc(description: str) -> Optional[str]:
     # Old storage: magna002.../openshift-clusters/NAME/...
     # New storage: df-qe-jenkins-storage.../clusters/NAME/...
-    m = re.search(r'/(?:openshift-)?clusters/([^/]+)/', description or "")
+    # [\w-]+ avoids capturing HTML tags/attributes from unquoted description text
+    m = re.search(r'/(?:openshift-)?clusters/([\w-]+)/', description or "")
     return m.group(1) if m else None
 
 

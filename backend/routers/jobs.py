@@ -260,8 +260,8 @@ async def trigger_job(body: TriggerRequest, session: dict = Depends(get_session)
     # Always deploy via the base job, never production trigger jobs
     target_job = MANUAL_DEPLOY_TARGET
 
-    # Apply user params, then enforce non-prod overrides (can't be bypassed)
-    params = {**body.params, **NON_PROD_DEFAULTS}
+    # Non-prod defaults as base, user params override (so users CAN enable RUN_TEST etc.)
+    params = {**NON_PROD_DEFAULTS, **body.params}
     params["CLUSTER_NAME"] = body.cluster_name
 
     # Enforce DC-CP credentials for vsphere jobs (production trigger defaults use ECO).

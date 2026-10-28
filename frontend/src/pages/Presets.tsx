@@ -53,7 +53,7 @@ export default function Presets() {
   const { data: jobs = [] } = useQuery<DeployJob[]>({
     queryKey: ['deployments'],
     queryFn: () => api.get('/jobs/deployments'),
-    staleTime: 3_600_000,
+    staleTime: 300_000,
   })
 
   const deleteMutation = useMutation({

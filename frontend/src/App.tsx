@@ -25,12 +25,8 @@ function PrefetchManager({ username }: { username: string }) {
   const queryClient = useQueryClient()
 
   useEffect(() => {
-    // Kick off catalog prefetch immediately — runs in background while user is on any page
-    queryClient.prefetchQuery({
-      queryKey: ['deployments'],
-      queryFn: () => api.get('/jobs/deployments'),
-      staleTime: 3_600_000,
-    })
+    // Deploy catalog is kept warm by Layout's useQuery(['deployments']) —
+    // no prefetch needed here (it caused stale 1hr cache that outlived gcTime).
 
     // Step 1: fetch all clusters list
     queryClient.fetchQuery<any[]>({

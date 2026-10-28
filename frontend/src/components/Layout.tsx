@@ -18,6 +18,14 @@ export default function Layout() {
   const navigate = useNavigate()
   const { data: user } = useQuery<User>({ queryKey: ['me'], queryFn: () => api.get('/auth/me') })
 
+  // Keep deploy catalog warm on every page — backend disk-caches it (24h),
+  // so this is fast (~50ms). Prevents empty Deploy page when gcTime expires.
+  useQuery({
+    queryKey: ['deployments'],
+    queryFn: () => api.get('/jobs/deployments'),
+    staleTime: 300_000,
+  })
+
   async function logout() {
     closeStream()
     await api.post('/auth/logout')

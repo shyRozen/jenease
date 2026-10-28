@@ -163,6 +163,7 @@ export default function Deploy() {
   const navigate = useNavigate()
   const [buildingPresetId, setBuildingPresetId] = useState<number | null>(null)
   const [presetToasts, setPresetToasts] = useState<Record<number, string>>({})
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
 
   const { data: jobs = [], isLoading } = useQuery<DeployJob[]>({
     queryKey: ['deployments'],
@@ -177,8 +178,17 @@ export default function Deploy() {
 
   const deletePresetMutation = useMutation({
     mutationFn: (id: number) => api.delete(`/presets/${id}`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['presets'] }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['presets'] }); setConfirmDeleteId(null) },
   })
+
+  function handleDeletePreset(id: number) {
+    if (confirmDeleteId === id) {
+      deletePresetMutation.mutate(id)
+    } else {
+      setConfirmDeleteId(id)
+      setTimeout(() => setConfirmDeleteId(prev => prev === id ? null : prev), 3000)
+    }
+  }
 
   function openModify(job: DeployJob, clusterName: string) {
     setModifyJob(job)
@@ -330,8 +340,9 @@ export default function Deploy() {
                 </button>
                 <button onClick={() => openFromPreset(p)} disabled={!matchedJob}
                   className="text-[10px] font-mono text-text-muted hover:text-accent-cyan px-0.5 shrink-0 disabled:opacity-30" title="Modify">⚙</button>
-                <button onClick={() => deletePresetMutation.mutate(p.id)}
-                  className="text-[10px] font-mono text-text-muted hover:text-accent-red px-0.5 shrink-0" title="Remove">✕</button>
+                <button onClick={() => handleDeletePreset(p.id)}
+                  className={`text-[10px] font-mono px-0.5 shrink-0 transition-colors ${confirmDeleteId === p.id ? 'text-accent-red' : 'text-text-muted hover:text-accent-red'}`}
+                  title={confirmDeleteId === p.id ? 'Confirm delete' : 'Remove'}>{confirmDeleteId === p.id ? '✓' : '✕'}</button>
               </div>
             )
           })}
@@ -402,8 +413,8 @@ export default function Deploy() {
                       </div>
                       {job && <p className="text-[10px] font-mono text-text-muted mt-0.5">{job.title}</p>}
                     </div>
-                    <button onClick={() => deletePresetMutation.mutate(p.id)}
-                      className="text-text-muted hover:text-accent-red text-lg leading-none shrink-0">✕</button>
+                    <button onClick={() => handleDeletePreset(p.id)}
+                      className={`text-lg leading-none shrink-0 transition-colors ${confirmDeleteId === p.id ? 'text-accent-red' : 'text-text-muted hover:text-accent-red'}`}>{confirmDeleteId === p.id ? '✓' : '✕'}</button>
                   </div>
                   {job && (
                     <div className="flex items-center gap-1.5 flex-wrap">
@@ -493,8 +504,8 @@ export default function Deploy() {
                           className="btn-primary text-[10px] py-1 px-2 disabled:opacity-40">{isBuilding ? '…' : '▶ Build'}</button>
                         <button onClick={() => job && openFromPreset(p)} disabled={!job}
                           className="btn-ghost text-[10px] py-1 px-1.5 disabled:opacity-40">⚙</button>
-                        <button onClick={() => deletePresetMutation.mutate(p.id)}
-                          className="text-text-muted hover:text-accent-red text-[10px] px-1">✕</button>
+                        <button onClick={() => handleDeletePreset(p.id)}
+                          className={`text-[10px] px-1 transition-colors ${confirmDeleteId === p.id ? 'text-accent-red' : 'text-text-muted hover:text-accent-red'}`}>{confirmDeleteId === p.id ? '✓' : '✕'}</button>
                       </div>
                     </td>
                   </tr>

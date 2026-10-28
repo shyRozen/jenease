@@ -44,6 +44,7 @@ export default function Presets() {
   const [modifyPresetName, setModifyPresetName] = useState<string | undefined>(undefined)
   const [buildingId, setBuildingId] = useState<number | null>(null)
   const [toasts, setToasts] = useState<Record<number, string>>({})
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null)
 
   const { data: presets = [], isLoading } = useQuery<Preset[]>({
     queryKey: ['presets'],
@@ -58,8 +59,17 @@ export default function Presets() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => api.delete(`/presets/${id}`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['presets'] }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['presets'] }); setConfirmDeleteId(null) },
   })
+
+  function handleDelete(id: number) {
+    if (confirmDeleteId === id) {
+      deleteMutation.mutate(id)
+    } else {
+      setConfirmDeleteId(id)
+      setTimeout(() => setConfirmDeleteId(prev => prev === id ? null : prev), 3000)
+    }
+  }
 
   const filtered = useMemo(() => {
     if (!query.trim()) return presets
@@ -178,8 +188,9 @@ export default function Presets() {
                       </div>
                       <p className="text-[10px] font-mono text-text-muted mt-0.5 truncate">{preset.job}</p>
                     </div>
-                    <button onClick={() => deleteMutation.mutate(preset.id)}
-                      className="text-text-muted hover:text-accent-red text-lg leading-none shrink-0 transition-colors" title="Remove">✕</button>
+                    <button onClick={() => handleDelete(preset.id)}
+                      className={`text-lg leading-none shrink-0 transition-colors ${confirmDeleteId === preset.id ? 'text-accent-red' : 'text-text-muted hover:text-accent-red'}`}
+                      title={confirmDeleteId === preset.id ? 'Confirm delete' : 'Remove'}>{confirmDeleteId === preset.id ? '✓' : '✕'}</button>
                   </div>
 
                   {job && (
@@ -283,8 +294,8 @@ export default function Presets() {
                         </button>
                         <button onClick={() => openEdit(preset)} disabled={!job}
                           className="btn-ghost text-[10px] py-1 px-1.5 disabled:opacity-40">⚙</button>
-                        <button onClick={() => deleteMutation.mutate(preset.id)}
-                          className="text-text-muted hover:text-accent-red text-[10px] py-1 px-1 transition-colors">✕</button>
+                        <button onClick={() => handleDelete(preset.id)}
+                          className={`text-[10px] py-1 px-1 transition-colors ${confirmDeleteId === preset.id ? 'text-accent-red' : 'text-text-muted hover:text-accent-red'}`}>{confirmDeleteId === preset.id ? '✓' : '✕'}</button>
                       </div>
                     </td>
                   </tr>

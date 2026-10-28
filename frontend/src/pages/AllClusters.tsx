@@ -396,6 +396,30 @@ function sortClusters(list: ClusterEntry[], by: SortKey): ClusterEntry[] {
   })
 }
 
+const STAGE_LABELS: Record<string, string> = {
+  locker_queue:   'Locker Queue',
+  init:           'Initialization',
+  prepare_jslave: 'Prepare JSlave',
+  install_ocp:    'Install OCP',
+  deploy_edr:     'Deploy EDR',
+  install_ocs:    'Install OCS',
+  install_fusion: 'Install Fusion',
+  install_fdf:    'Install FDF',
+  rhcs:           'External RHCS',
+  upgrade:        'Upgrade',
+  test:           'Test',
+  lib_test:       'Lib Test',
+  teardown:       'Teardown',
+  paused_input:   'Paused',
+}
+
+const STAGE_ORDER = [
+  'Locker Queue', 'Initialization', 'Prepare JSlave',
+  'Install OCP', 'Deploy EDR', 'Install OCS', 'Install Fusion', 'Install FDF',
+  'External RHCS', 'Upgrade', 'Test', 'Lib Test', 'Paused', 'Teardown',
+  'Building',
+]
+
 function groupClusters(
   list: ClusterEntry[], by: GroupKey,
   qc?: ReturnType<typeof useQueryClient>
@@ -404,13 +428,16 @@ function groupClusters(
   const map = new Map<string, ClusterEntry[]>()
   for (const c of list) {
     let key: string
-    if (by === 'stage' && c.building) {
-      const { stage, paused_at } = qc ? getStageFromCache(qc, c.cluster_name) : { stage: null }
-      if (stage === 'paused_input' && paused_at === 'teardown') {
-        // Cluster is fully deployed, paused waiting for teardown input — group by health
-        key = (qc ? getHealthStatusFromCache(qc, c.cluster_name) : null) ?? 'Active'
+    if (by === 'stage' && (c.building || c.destroying)) {
+      if (c.destroying) {
+        key = 'Destroying'
       } else {
-        key = stage ? `Building · ${stage}` : 'Building'
+        const { stage, paused_at } = qc ? getStageFromCache(qc, c.cluster_name) : { stage: null }
+        if (stage === 'paused_input' && paused_at === 'teardown') {
+          key = (qc ? getHealthStatusFromCache(qc, c.cluster_name) : null) ?? 'Active'
+        } else {
+          key = stage ? (STAGE_LABELS[stage] ?? stage) : 'Building'
+        }
       }
     } else {
       key = by === 'owner'    ? c.owner
@@ -424,7 +451,12 @@ function groupClusters(
     map.get(key)!.push(c)
   }
   return [...map.entries()].sort((a, b) => {
-    const aB = a[0].startsWith('Building'), bB = b[0].startsWith('Building')
+    if (by === 'stage') {
+      const ai = STAGE_ORDER.indexOf(a[0]), bi = STAGE_ORDER.indexOf(b[0])
+      const aIdx = ai >= 0 ? ai : 999, bIdx = bi >= 0 ? bi : 999
+      if (aIdx !== bIdx) return aIdx - bIdx
+    }
+    const aB = a[0].startsWith('Building') || a[0] === 'Destroying', bB = b[0].startsWith('Building') || b[0] === 'Destroying'
     if (aB !== bB) return aB ? -1 : 1
     return b[1].length - a[1].length
   })
@@ -433,8 +465,13 @@ function groupClusters(
 // ── main page ─────────────────────────────────────────────────────────────────
 
 function getStageFromCache(qc: ReturnType<typeof useQueryClient>, clusterName: string): { stage: string | null; paused_at?: string } {
-  const d = qc.getQueryData<{ stage: string | null; paused_at?: string }>(['stage', clusterName])
-  return { stage: d?.stage ?? null, paused_at: d?.paused_at }
+  // Query key is ['stage', clusterName, buildNum] — find any matching entry
+  const cache = qc.getQueryCache().findAll({ queryKey: ['stage', clusterName] })
+  for (const q of cache) {
+    const d = q.state.data as { stage: string | null; paused_at?: string } | undefined
+    if (d?.stage) return { stage: d.stage, paused_at: d.paused_at }
+  }
+  return { stage: null }
 }
 
 function getHealthStatusFromCache(qc: ReturnType<typeof useQueryClient>, clusterName: string): string | null {
@@ -495,15 +532,14 @@ export default function AllClusters({ username }: { username: string }) {
 
   const queryClient = useQueryClient()
 
-  // Increment whenever any health query settles so filteredVisible recomputes.
-  // queryClient reference is stable — getQueryData alone won't trigger a re-render.
+  // Increment whenever health or stage queries settle so filteredVisible + grouping recompute.
   const [healthTick, setHealthTick] = useState(0)
   useEffect(() => {
     return queryClient.getQueryCache().subscribe(event => {
       if (
         event.type === 'updated' &&
         Array.isArray(event.query.queryKey) &&
-        event.query.queryKey[0] === 'health'
+        (event.query.queryKey[0] === 'health' || event.query.queryKey[0] === 'stage')
       ) {
         setHealthTick(t => t + 1)
       }
@@ -524,7 +560,7 @@ export default function AllClusters({ username }: { username: string }) {
   }, [filtered, hideNotFound, queryClient, healthTick])
 
   const sorted = useMemo(() => sortClusters(filteredVisible, sortBy), [filteredVisible, sortBy])
-  const grouped = useMemo(() => groupClusters(sorted, groupBy, queryClient), [sorted, groupBy, queryClient])
+  const grouped = useMemo(() => groupClusters(sorted, groupBy, queryClient), [sorted, groupBy, queryClient, healthTick])
 
   const SelectBtn = ({ value, current, set, label }: { value: string; current: string; set: (v: any) => void; label: string }) => (
     <button onClick={() => set(value)}

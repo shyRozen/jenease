@@ -855,6 +855,10 @@ async def cluster_health(
 _NODE_RESOURCES_CACHE: dict[str, tuple[dict, float]] = {}
 _NODE_RESOURCES_TTL = 30
 
+# wfapi stage cache — keyed by (job, build_num), shared across all users
+_STAGE_CACHE: dict[tuple[str, int], tuple[dict, float]] = {}
+_STAGE_CACHE_TTL = 25  # slightly under frontend 30s poll to avoid serving truly stale data
+
 _WORKER_NODES_CACHE: dict[str, tuple[dict, float]] = {}
 _WORKER_NODES_TTL = 60
 
@@ -1353,6 +1357,87 @@ async def cluster_iops_stream(
     return EventSourceResponse(generate(), headers={"Content-Encoding": "identity"})
 
 
+async def _fetch_stage_cached(
+    job: str, build_num: int, build_url: str,
+    username: str, token: str, stage_map: dict[str, str],
+) -> dict:
+    """Fetch wfapi stage with a shared server-side cache (25s TTL).
+    Eliminates redundant Jenkins calls when multiple users view the same build."""
+    cache_key = (job, build_num)
+    cached = _STAGE_CACHE.get(cache_key)
+    if cached and _time.time() - cached[1] < _STAGE_CACHE_TTL:
+        return cached[0]
+
+    try:
+        async with httpx.AsyncClient(timeout=10, verify=False) as c:
+            r = await c.get(
+                f"{settings.jenkins_url}/job/{job}/{build_num}/wfapi/describe",
+                auth=(username, token),
+            )
+        if r.status_code in (401, 403):
+            async with httpx.AsyncClient(timeout=10, verify=False) as c:
+                r = await c.get(
+                    f"{settings.jenkins_url}/job/{job}/{build_num}/wfapi/describe"
+                )
+        wf = r.json()
+    except Exception:
+        return {"stage": None}
+
+    # Check for paused-pending-input
+    if wf.get("status") == "PAUSED_PENDING_INPUT":
+        for s in wf.get("stages", []):
+            if s.get("status") == "PAUSED_PENDING_INPUT":
+                result: dict = {"stage": "paused_input", "paused_at": stage_map.get(s["name"], s["name"].lower().replace(" ", "_"))}
+                _STAGE_CACHE[cache_key] = (result, _time.time())
+                return result
+
+    # Find the currently in-progress stage
+    current: Optional[str] = None
+    for s in wf.get("stages", []):
+        if s.get("status") == "IN_PROGRESS":
+            current = s["name"]
+            break
+    if not current:
+        for s in reversed(wf.get("stages", [])):
+            if s.get("status") == "SUCCESS":
+                current = s["name"]
+                break
+
+    # Pre-pipeline: check locker queue or fall back to "init"
+    if not current and build_url:
+        locker = await _fetch_locker_queue()
+        build_clean = build_url.rstrip('/')
+        for url, ts in locker.items():
+            if url.rstrip('/') == build_clean:
+                result = {"stage": "locker_queue", "queue_since": ts}
+                _STAGE_CACHE[cache_key] = (result, _time.time())
+                return result
+        result = {"stage": "init"}
+        _STAGE_CACHE[cache_key] = (result, _time.time())
+        return result
+
+    if not current:
+        return {"stage": None}
+
+    short = stage_map.get(current, current.lower().replace(" ", "_"))
+    queue_since: Optional[str] = None
+
+    if current == "Initialization" and build_url:
+        locker = await _fetch_locker_queue()
+        build_clean = build_url.rstrip('/')
+        for url, ts in locker.items():
+            if url.rstrip('/') == build_clean:
+                short = "locker_queue"
+                queue_since = ts
+                break
+
+    result = {"stage": short}
+    if queue_since:
+        result["queue_since"] = queue_since
+    _STAGE_CACHE[cache_key] = (result, _time.time())
+    return result
+
+
 @router.get("/{cluster_name}/stage")
 async def cluster_stage(
     cluster_name: str,
@@ -1368,9 +1453,11 @@ async def cluster_stage(
     build_url: Optional[str] = None
 
     if build_num and build_num > 0:
-        # Fast path: caller supplied the build number — go straight to wfapi.
-        # Try each deploy job until wfapi returns something useful.
         for job in [DEPLOY_JOB, PROD_DEPLOY_JOB, FDF_DEPLOY_JOB]:
+            cache_key = (job, build_num)
+            cached = _STAGE_CACHE.get(cache_key)
+            if cached and _time.time() - cached[1] < _STAGE_CACHE_TTL:
+                return cached[0]
             test_url = f"{settings.jenkins_url}/job/{job}/{build_num}/wfapi/describe"
             try:
                 async with httpx.AsyncClient(timeout=5, verify=False) as c:
@@ -1381,12 +1468,9 @@ async def cluster_stage(
                     break
             except Exception:
                 pass
-        # If none matched, default to DEPLOY_JOB with supplied build_num
         if not build_url:
             build_url = f"{settings.jenkins_url}/job/{DEPLOY_JOB}/{build_num}"
     else:
-        # Slow path: scan recent builds to find the currently-building one.
-        # Only 50 builds needed — building clusters are always near the top.
         all_job_builds = await asyncio.gather(
             jenkins.get_job_builds(DEPLOY_JOB, limit=50),
             jenkins.get_job_builds(PROD_DEPLOY_JOB, limit=50),
@@ -1413,114 +1497,20 @@ async def cluster_stage(
     if not build_num:
         return {"stage": None}
 
-    # Query wfapi/describe for stage info — SSO fallback if Basic Auth is rejected
-    try:
-        async with httpx.AsyncClient(timeout=10, verify=False) as c:
-            r = await c.get(
-                f"{settings.jenkins_url}/job/{found_job}/{build_num}/wfapi/describe",
-                auth=(session["username"], session["token"]),
-            )
-        if r.status_code in (401, 403):
-            async with httpx.AsyncClient(timeout=10, verify=False) as c:
-                r = await c.get(
-                    f"{settings.jenkins_url}/job/{found_job}/{build_num}/wfapi/describe"
-                )
-        wf = r.json()
-    except Exception:
-        return {"stage": None}
-
-    # Check for paused-pending-input at the overall or stage level
-    paused_at: Optional[str] = None
-    if wf.get("status") == "PAUSED_PENDING_INPUT":
-        for s in wf.get("stages", []):
-            if s.get("status") == "PAUSED_PENDING_INPUT":
-                paused_at = STAGE_SHORT.get(s["name"], s["name"].lower().replace(" ", "_"))
-                break
-
-    if paused_at is not None:
-        result: dict = {"stage": "paused_input", "paused_at": paused_at}
-        return result
-
-    # Find the currently in-progress stage
-    current: Optional[str] = None
-    for s in wf.get("stages", []):
-        if s.get("status") == "IN_PROGRESS":
-            current = s["name"]
-            break
-    # Fall back to last SUCCESS stage if nothing in progress yet
-    if not current:
-        for s in reversed(wf.get("stages", [])):
-            if s.get("status") == "SUCCESS":
-                current = s["name"]
-                break
-
-    # If wfapi has no stage data yet (build is pre-pipeline — agent allocation,
-    # locker queue, Groovy setup) check the locker and fall back to "init".
-    # This is the most common reason substatus shows nothing for early builds.
-    queue_since: Optional[str] = None
-    if not current and build_url:
-        locker = await _fetch_locker_queue()
-        build_clean = build_url.rstrip('/')
-        for url, ts in locker.items():
-            if url.rstrip('/') == build_clean:
-                return {"stage": "locker_queue", "queue_since": ts}
-        # Not in locker — build is starting up, show generic init
-        return {"stage": "init"}
-
-    if not current:
-        return {"stage": None}
-
-    short = STAGE_SHORT.get(current, current.lower().replace(" ", "_"))
-
-    # If in Initialization check if blocked on locker queue
-    if current == "Initialization" and build_url:
-        locker = await _fetch_locker_queue()
-        build_clean = build_url.rstrip('/')
-        for url, ts in locker.items():
-            if url.rstrip('/') == build_clean:
-                short = "locker_queue"
-                queue_since = ts
-                break
-
-    result: dict = {"stage": short}
-    if queue_since:
-        result["queue_since"] = queue_since
-    return result
+    return await _fetch_stage_cached(
+        found_job, build_num, build_url or "",
+        session["username"], session["token"], STAGE_SHORT,
+    )
 
 
 @router.get("/{cluster_name}/destroy-stage")
 async def cluster_destroy_stage(cluster_name: str, build_num: int, session: dict = Depends(get_session)):
     """Current Jenkins pipeline stage for a running destroy job."""
-    try:
-        async with httpx.AsyncClient(timeout=10, verify=False) as c:
-            r = await c.get(
-                f"{settings.jenkins_url}/job/{DESTROY_JOB}/{build_num}/wfapi/describe",
-                auth=(session["username"], session["token"]),
-            )
-        if r.status_code in (401, 403):
-            async with httpx.AsyncClient(timeout=10, verify=False) as c:
-                r = await c.get(
-                    f"{settings.jenkins_url}/job/{DESTROY_JOB}/{build_num}/wfapi/describe"
-                )
-        wf = r.json()
-    except Exception:
-        return {"stage": None}
-
-    current: Optional[str] = None
-    for s in wf.get("stages", []):
-        if s.get("status") == "IN_PROGRESS":
-            current = s["name"]
-            break
-    if not current:
-        for s in reversed(wf.get("stages", [])):
-            if s.get("status") == "SUCCESS":
-                current = s["name"]
-                break
-
-    if not current:
-        return {"stage": None}
-
-    return {"stage": DESTROY_STAGE_SHORT.get(current, current.lower().replace(" ", "_"))}
+    build_url = f"{settings.jenkins_url}/job/{DESTROY_JOB}/{build_num}"
+    return await _fetch_stage_cached(
+        DESTROY_JOB, build_num, build_url,
+        session["username"], session["token"], DESTROY_STAGE_SHORT,
+    )
 
 
 @router.get("/{cluster_name}/kubeconfig")

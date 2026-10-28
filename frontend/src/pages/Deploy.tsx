@@ -167,7 +167,7 @@ export default function Deploy() {
   const { data: jobs = [], isLoading } = useQuery<DeployJob[]>({
     queryKey: ['deployments'],
     queryFn: () => api.get('/jobs/deployments'),
-    staleTime: 300_000,
+    staleTime: 86_400_000,
   })
 
   const { data: presets = [] } = useQuery<Preset[]>({

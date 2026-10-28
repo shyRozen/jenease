@@ -23,7 +23,7 @@ export default function Layout() {
   useQuery({
     queryKey: ['deployments'],
     queryFn: () => api.get('/jobs/deployments'),
-    staleTime: 300_000,
+    staleTime: 86_400_000,
   })
 
   async function logout() {
